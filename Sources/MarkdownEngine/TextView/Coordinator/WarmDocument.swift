@@ -78,30 +78,6 @@ final class WarmDocument {
         self.lastFullMeasure = textView.lastFullMeasure
     }
 
-    /// Opt-in while this is experimental. A real embedder-facing switch belongs
-    /// in `MarkdownEditorConfiguration` once the memory cost is settled.
-    ///
-    /// Announces itself once, so a run can never leave you wondering whether the
-    /// feature was on — an absent `warmSwap` counter otherwise looks identical
-    /// whether the flag is off, the document was never open before, or the swap
-    /// silently failed.
-#if DEBUG
-    private static let resolved: Bool = {
-        // Two ways in, because the env var depends on Xcode having re-read the
-        // scheme — it caches schemes at project-open, so editing the .xcscheme
-        // file under a running Xcode silently has no effect. The user default
-        // needs no Xcode at all and survives restarts.
-        let env = ProcessInfo.processInfo.environment["MD_WARM_SWITCH"] == "1"
-        let pref = UserDefaults.standard.bool(forKey: "MDWarmSwitch")
-        let on = env || pref
-        print("🔥 PERF warmSwitch \(on ? "ENABLED" : "off")"
-              + " (env=\(env ? "1" : "0") default=\(pref ? "1" : "0"))")
-        return on
-    }()
-    static var isEnabled: Bool { resolved }
-#else
-    static var isEnabled: Bool { false }
-#endif
 }
 
 /// A small least-recently-used set of documents kept laid out.
@@ -163,6 +139,18 @@ final class WarmDocumentPool {
 
     func removeAll() {
         documents.removeAll()
+    }
+
+    /// Drop stacks for documents the embedder no longer retains.
+    ///
+    /// Without this the pool is a leak with a very large constant: a document
+    /// closed in the app keeps tens of megabytes of laid-out fragments alive
+    /// until two other documents happen to push it out. The embedder already
+    /// tells the editor which documents matter, via `retainedScrollDocumentIds`.
+    func prune(keeping retained: Set<String>, current: String?) {
+        documents.removeAll { document in
+            document.documentId != current && !retained.contains(document.documentId)
+        }
     }
 
     /// Least- to most-recently-used ids, for the switch trace. Without it a miss

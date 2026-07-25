@@ -439,6 +439,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 context.coordinator.undoManagers.removeValue(forKey: key)
                 context.coordinator.undoContentSnapshots.removeValue(forKey: key)
             }
+            // Warm stacks too. This one matters far more than the dictionaries
+            // above: a retained stack is tens of megabytes of laid-out
+            // fragments, and without this it survives until two other documents
+            // happen to evict it.
+            context.coordinator.warmDocuments.prune(keeping: retained, current: documentId)
         }
 
         let wtActive: Bool = {
@@ -608,7 +613,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // could evict the incoming one in the same breath.
             // Skipped entirely unless MD_WARM_SWITCH=1.
             var incomingWarm: WarmDocument?
-            if WarmDocument.isEnabled {
+            if configuration.warmDocumentSwitching {
                 incomingWarm = context.coordinator.warmDocuments.take(documentId)
                 if incomingWarm == nil {
                     PerfTrace.stamp("warmSwap.miss", 0,
@@ -638,7 +643,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             } else {
                 // Not warm: give the incoming document its own stack, so the one
                 // just captured keeps its layout instead of being written over.
-                if WarmDocument.isEnabled {
+                if configuration.warmDocumentSwitching {
                     let (storage, layoutManager, container) = context.coordinator.makeTextKitStack()
                     _ = storage
                     _ = layoutManager

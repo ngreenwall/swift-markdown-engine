@@ -47,6 +47,18 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var textInsets: TextInsets
     /// Centered reading-column width; wide tables break out to full width. nil = full width (default).
     public var readingWidth: CGFloat?
+    /// Keep the last few documents' laid-out TextKit 2 stacks alive, so switching
+    /// back to one is a pointer swap instead of a rebuild.
+    ///
+    /// Measured on a 346 KB / 7,715-paragraph note: 723 ms to rebuild against
+    /// 5–15 ms to restore, with not one layout fragment re-created. The price is
+    /// memory — roughly 66–95 MB of retained layout for a document that size —
+    /// which is why this is opt-in and why the pool is bounded on both document
+    /// count and total retained text. Embedders whose notes are all small gain
+    /// little and should leave it off.
+    ///
+    /// - SeeAlso: ``WarmDocumentPool``
+    public var warmDocumentSwitching: Bool
     public var spellChecking: SpellCheckingPolicy
     /// How the editor resolves its own height.
     ///
@@ -96,6 +108,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         scrollers: ScrollersPolicy = .default,
         textInsets: TextInsets = .default,
         readingWidth: CGFloat? = nil,
+        warmDocumentSwitching: Bool = false,
         spellChecking: SpellCheckingPolicy = .default,
         heightBehavior: HeightBehavior = .scrolls,
         rawSourceMode: Bool = false,
@@ -121,6 +134,7 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.scrollers = scrollers
         self.textInsets = textInsets
         self.readingWidth = readingWidth
+        self.warmDocumentSwitching = warmDocumentSwitching
         self.spellChecking = spellChecking
         self.heightBehavior = heightBehavior
         self.rawSourceMode = rawSourceMode

@@ -105,6 +105,34 @@ struct WarmDocumentPoolTests {
         #expect(pool.take("b") != nil) // and "b" was not pushed out by the duplicate
     }
 
+    @Test("Pruning drops documents the embedder no longer retains")
+    func pruneDropsUnretained() {
+        // Without this the pool is a leak with a very large constant: a closed
+        // document keeps tens of megabytes of laid-out fragments alive until two
+        // other documents happen to push it out.
+        let pool = WarmDocumentPool()
+        pool.store(makeDocument(id: "closed", characters: 346_000))
+        pool.store(makeDocument(id: "open", characters: 5_000))
+
+        pool.prune(keeping: ["open"], current: nil)
+
+        #expect(pool.take("closed") == nil)
+        #expect(pool.take("open") != nil)
+    }
+
+    @Test("Pruning never drops the current document")
+    func pruneKeepsCurrent() {
+        // The embedder's retained set does not necessarily include the document
+        // being displayed right now; evicting that one would rebuild the very
+        // stack in use.
+        let pool = WarmDocumentPool()
+        pool.store(makeDocument(id: "current", characters: 1_000))
+
+        pool.prune(keeping: [], current: "current")
+
+        #expect(pool.take("current") != nil)
+    }
+
     @Test("Re-storing counts as use, so the refreshed document is not the next evicted")
     func reStoringRefreshesRecency() {
         let pool = WarmDocumentPool(maxDocuments: 2, maxRetainedCharacters: 1_000_000)
