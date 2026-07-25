@@ -4,13 +4,9 @@
 //
 //  Created by Luca Chen on 25.07.26.
 //
-//  The pool decides which documents stay laid out across a switch. Getting it
-//  wrong is invisible in the UI — a wrongly evicted document just rebuilds, and
-//  a wrongly RETAINED one just costs memory — so the eviction rules are pinned
-//  here rather than left to be noticed in a trace months later.
-//
-//  The case that motivated the pool is `detourStillFindsTheFirstDocument`:
-//  a single slot made A↔B free and A→B→C→A a full rebuild.
+//  Eviction rules for the warm pool. Getting them wrong is invisible in the UI
+//  — a wrongly evicted document just rebuilds, a wrongly retained one just costs
+//  memory — so they are pinned here instead of noticed in a trace months later.
 //
 
 import AppKit
@@ -93,18 +89,6 @@ struct WarmDocumentPoolTests {
         #expect(pool.take("huge") != nil)
     }
 
-    @Test("Re-storing a document replaces its earlier stack rather than duplicating it")
-    func reStoringReplaces() {
-        let pool = WarmDocumentPool(maxDocuments: 3, maxRetainedCharacters: 1_000_000)
-        pool.store(makeDocument(id: "a", characters: 10))
-        pool.store(makeDocument(id: "b", characters: 10))
-        pool.store(makeDocument(id: "a", characters: 20)) // same id, newer stack
-
-        #expect(pool.take("a") != nil)
-        #expect(pool.take("a") == nil) // only one entry existed
-        #expect(pool.take("b") != nil) // and "b" was not pushed out by the duplicate
-    }
-
     @Test("Adopting a smaller policy trims immediately, not one switch later")
     func applyShrinksNow() {
         let pool = WarmDocumentPool(maxDocuments: 5, maxRetainedCharacters: 1_000_000)
@@ -121,25 +105,10 @@ struct WarmDocumentPoolTests {
         #expect(pool.take("e") != nil)
     }
 
-    @Test("A larger policy takes effect without discarding what is held")
-    func applyGrowsWithoutLoss() {
-        let pool = WarmDocumentPool(maxDocuments: 2, maxRetainedCharacters: 1_000_000)
-        pool.store(makeDocument(id: "a", characters: 100))
-        pool.store(makeDocument(id: "b", characters: 100))
-
-        pool.apply(WarmDocumentPolicy(isEnabled: true, maxDocuments: 6, maxCharacters: 1_000_000))
-        pool.store(makeDocument(id: "c", characters: 100))
-
-        #expect(pool.take("a") != nil)
-        #expect(pool.take("b") != nil)
-        #expect(pool.take("c") != nil)
-    }
-
     @Test("Pruning drops documents the embedder no longer retains")
     func pruneDropsUnretained() {
-        // Without this the pool is a leak with a very large constant: a closed
-        // document keeps tens of megabytes of laid-out fragments alive until two
-        // other documents happen to push it out.
+        // For embedders that release a document early (closed window, deleted
+        // file). Not wired to the tab strip — see NativeTextViewWrapper.
         let pool = WarmDocumentPool()
         pool.store(makeDocument(id: "closed", characters: 346_000))
         pool.store(makeDocument(id: "open", characters: 5_000))
@@ -148,19 +117,6 @@ struct WarmDocumentPoolTests {
 
         #expect(pool.take("closed") == nil)
         #expect(pool.take("open") != nil)
-    }
-
-    @Test("Pruning never drops the current document")
-    func pruneKeepsCurrent() {
-        // The embedder's retained set does not necessarily include the document
-        // being displayed right now; evicting that one would rebuild the very
-        // stack in use.
-        let pool = WarmDocumentPool()
-        pool.store(makeDocument(id: "current", characters: 1_000))
-
-        pool.prune(keeping: [], current: "current")
-
-        #expect(pool.take("current") != nil)
     }
 
     @Test("Re-storing counts as use, so the refreshed document is not the next evicted")

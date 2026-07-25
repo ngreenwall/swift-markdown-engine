@@ -191,22 +191,15 @@ extension NativeTextViewCoordinator {
             (textView as? NativeTextView)?.lastFullMeasure = nil
         }
 
-        // Caret-derived state, reset explicitly.
-        //
-        // `textViewDidChangeSelection` is suppressed for the whole rebuild (see
-        // `isRebuildingDocument`), and on a node switch that handler is what
-        // used to clear the OUTGOING document's caret state — otherwise a wiki
-        // link the caret sat inside over there stays "active" over here, and
-        // its popover with it. Doing it here is O(1) against the document that
-        // is now actually loaded, rather than an O(document) handler run
-        // against one whose attributes have not been applied yet.
+        // Caret-derived state: `textViewDidChangeSelection` is suppressed for the
+        // whole rebuild, and on a switch it is what used to clear the OUTGOING
+        // document's — otherwise a wiki link the caret sat in over there stays
+        // active here, popover and all.
         let selection = textView.selectedRange()
         previousCaretLocation = selection.location
         previousSelectedRange = selection
-        // Both of these reach SwiftUI state — a binding and an embedder closure —
-        // and this runs inside `updateNSView`, i.e. inside the update pass.
-        // Touching them synchronously trips "Modifying state during view update";
-        // deferred, exactly as the wrapper's raw-source-mode branch already does.
+        // Deferred: a binding and an embedder closure, touched from inside
+        // `updateNSView`, would trip "Modifying state during view update".
         let hadActiveLink = isWikiLinkActive
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

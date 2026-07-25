@@ -4,37 +4,30 @@
 //
 //  Created by Luca Chen on 25.07.26.
 //
-//  Keeps one document's laid-out TextKit 2 stack alive across a tab switch, so
-//  switching back is a pointer swap instead of a rebuild.
+//  Keeps a document's laid-out TextKit 2 stack alive across a switch, so coming
+//  back is a pointer swap instead of a rebuild.
 //
-//  Why this works: the fragment cache lives on the NSTextLayoutManager, and
-//  `NSTextView.textLayoutManager` is derived from its text container. Repointing
-//  `container.textView` therefore hands the view a different, already-laid-out
-//  stack. Measured on a 7,715-paragraph document: 4.5–14.8 ms, against 483 ms to
-//  rebuild it. Swapping the *content manager* instead (`tlm.replace(_:)`) does
-//  NOT keep layout — that measured 378 ms, a full cold rebuild — and pooling
-//  whole NSTextViews would multiply undo, spell-checking, first-responder and
-//  WritingTools state, so neither is used here.
+//  The fragment cache lives on the NSTextLayoutManager and `NSTextView
+//  .textLayoutManager` is derived from its container, so repointing
+//  `container.textView` hands the view an already-laid-out stack. Measured on a
+//  7,715-paragraph document: 4.5–14.8 ms against 483 ms to rebuild.
 //
-//  Two things make this affordable in this editor specifically: the reading-width
-//  mode pins the wrap width (`widthTracksTextView = false`), so retained layout
-//  does not reflow when the window or sidebar resizes; and undo is already keyed
-//  by documentId rather than by view.
+//  Two alternatives were measured and rejected: swapping the content manager
+//  (`tlm.replace(_:)`) does not keep layout — 378 ms, a full cold rebuild — and
+//  pooling whole NSTextViews would multiply undo, spell-checking, first-responder
+//  and WritingTools state.
 //
-//  The price is memory — roughly 66–95 MB of retained layout for a 346 KB
-//  document — which is why `WarmDocumentPool` below holds a handful rather than
-//  everything, and why the whole thing is off unless `MD_WARM_SWITCH=1` is set.
+//  Affordable here because reading-width mode pins the wrap width, so retained
+//  layout does not reflow on resize, and undo is keyed by documentId not by view.
 //
 
 import AppKit
 
 /// A complete TextKit 2 stack plus the document state that belongs with it.
 ///
-/// The session travels with the stack deliberately. Restoring a document's text
-/// without `DocumentSession.lastComputedStorage` — the splice base for the
-/// incremental writeback — would make the next keystroke write this document's
-/// text spliced with another's edit, to disk, silently. Bundling them makes that
-/// mistake unrepresentable rather than merely unlikely.
+/// The session must travel with the stack: restoring text without
+/// `DocumentSession.lastComputedStorage` — the writeback splice base — would
+/// write this document spliced with another's edit, to disk, silently.
 final class WarmDocument {
     let documentId: String
     let contentStorage: NSTextContentStorage
@@ -101,14 +94,11 @@ public struct WarmDocumentPolicy: Sendable {
 
     /// Upper bound on total retained TEXT across the pool.
     ///
-    /// A second bound is needed because neither measure alone is honest: a count
-    /// ignores that one 346 KB note costs more than twenty ordinary ones, while
-    /// text length is only a proxy for the real cost — retained layout, which is
-    /// dominated by rendered elements rather than by characters. There is no
-    /// cheap way to ask TextKit what a laid-out document weighs, so this bounds
-    /// the two things that can be measured, conservatively.
-    ///
-    /// A document that exceeds this on its own is still admitted; refusing it
+    /// A second bound, because a count alone ignores that one 346 KB note costs
+    /// more than twenty ordinary ones. Characters are only a proxy for the real
+    /// cost — retained layout, dominated by rendered elements — but TextKit
+    /// offers no cheap way to weigh a laid-out document, so this bounds what can
+    /// be measured. A document exceeding it alone is still admitted; refusing it
     /// would leave the slowest case the only one that never benefits.
     public var maxCharacters: Int
 
@@ -123,26 +113,15 @@ public struct WarmDocumentPolicy: Sendable {
 
 /// A small least-recently-used set of documents kept laid out.
 ///
-/// One slot is not enough for how people actually move: it makes A↔B free and
-/// A→B→C→A a full rebuild, because the third document evicts the first.
-/// Measured on the note this was built for — 50 ms warm, 732 ms after one
-/// detour.
-///
-/// Bounded on BOTH count and total retained text, because neither alone is
-/// honest. Count ignores that one 346 KB note costs more than twenty ordinary
-/// ones; text length is only a proxy for the real cost, which is retained
-/// layout and is dominated by rendered elements (images, tables) rather than by
-/// characters. There is no cheap way to ask TextKit what a laid-out document
-/// weighs, so this bounds the two things it CAN measure and stays conservative:
-/// three documents, and roughly two large notes' worth of text between them.
+/// One slot is not enough for how people move: it makes A↔B free and A→B→C→A a
+/// full rebuild. Measured on the note this was built for: 50 ms warm, 732 ms
+/// after one detour. Bounds come from ``WarmDocumentPolicy``.
 final class WarmDocumentPool {
 
     /// Least-recently-used first, so eviction is `removeFirst()`.
     private var documents: [WarmDocument] = []
 
-    /// Bounds, not constants: the embedder sets them through
-    /// ``WarmDocumentPolicy`` and may change them at runtime (a tab-strip size
-    /// is a user-visible setting in some apps). Applied on the next `store`.
+    /// Set from ``WarmDocumentPolicy``, which the embedder may change at runtime.
     var maxDocuments: Int
     var maxRetainedCharacters: Int
 
@@ -163,30 +142,27 @@ final class WarmDocumentPool {
         }
     }
 
-    /// Remove and return the stack held for `documentId`, if any.
-    ///
-    /// Removal is not an optimisation, it is the contract: the caller is about
-    /// to hand this stack back to the text view, and a pool still holding it
-    /// would be free to hand the same one out again or evict it while live.
+    /// Remove and return the stack held for `documentId`. Removal is the
+    /// contract, not an optimisation: the caller hands this stack back to the
+    /// text view, and a pool still holding it could re-issue or evict it live.
     func take(_ documentId: String) -> WarmDocument? {
         guard let index = documents.firstIndex(where: { $0.documentId == documentId }) else { return nil }
         return documents.remove(at: index)
     }
 
-    /// Keep `document` warm, evicting the least recently used until the pool is
-    /// back inside both bounds.
+    /// Keep `document` warm, evicting least-recently-used until back inside both
+    /// bounds.
     func store(_ document: WarmDocument) {
-        // A second stack for the same document would be a second answer to the
-        // same question — drop the older one rather than race it.
+        // A second stack for the same document is a second answer to one
+        // question — drop the older rather than race it.
         documents.removeAll { $0.documentId == document.documentId }
         documents.append(document)
 
         while documents.count > maxDocuments {
             documents.removeFirst()
         }
-        // `count > 1` so the newest document is never evicted for being large on
-        // its own. A note that exceeds the budget by itself is exactly the note
-        // worth keeping warm; refusing it would leave the slowest case slow.
+        // `count > 1`: never evict the newest for being large on its own — that
+        // is exactly the note worth keeping warm.
         while documents.count > 1,
               documents.reduce(0, { $0 + $1.retainedCharacters }) > maxRetainedCharacters {
             documents.removeFirst()
@@ -197,21 +173,16 @@ final class WarmDocumentPool {
         documents.removeAll()
     }
 
-    /// Drop stacks for documents the embedder no longer retains.
-    ///
-    /// Without this the pool is a leak with a very large constant: a document
-    /// closed in the app keeps tens of megabytes of laid-out fragments alive
-    /// until two other documents happen to push it out. The embedder already
-    /// tells the editor which documents matter, via `retainedScrollDocumentIds`.
+    /// Drop stacks for documents the embedder no longer needs — a closed window,
+    /// a deleted file. Not called by the engine; see NativeTextViewWrapper.
     func prune(keeping retained: Set<String>, current: String?) {
         documents.removeAll { document in
             document.documentId != current && !retained.contains(document.documentId)
         }
     }
 
-    /// Least- to most-recently-used ids, for the switch trace. Without it a miss
-    /// only says what was wanted, not what was held instead — which is the half
-    /// that explains WHY it missed.
+    /// Least- to most-recently-used ids, for the switch trace: a miss should say
+    /// what was held instead, not only what was wanted.
     var traceSummary: String {
         documents.isEmpty ? "none" : documents.map(\.documentId).joined(separator: ",")
     }
@@ -219,9 +190,8 @@ final class WarmDocumentPool {
 
 extension NativeTextViewCoordinator {
 
-    /// Build a fresh, empty TextKit 2 stack configured exactly like the one
-    /// `makeNSView` sets up, so a document that is not warm gets an equivalent
-    /// home instead of reusing the outgoing document's.
+    /// A fresh stack configured exactly like `makeNSView`'s, so a document that
+    /// is not warm gets its own instead of reusing the outgoing document's.
     func makeTextKitStack() -> (NSTextContentStorage, NSTextLayoutManager, NSTextContainer) {
         let contentStorage = NSTextContentStorage()
         let layoutManager = NSTextLayoutManager()
@@ -240,8 +210,7 @@ extension NativeTextViewCoordinator {
         return (contentStorage, layoutManager, container)
     }
 
-    /// Capture the stack currently on `textView`, together with this document's
-    /// session and the view-cached geometry, so a later switch back can restore it.
+    /// Capture the stack on `textView` with its session and view geometry.
     func captureWarmDocument(_ textView: NativeTextView, documentId: String, storageText: String) -> WarmDocument? {
         guard let contentStorage = textView.textContentStorage,
               let layoutManager = textView.textLayoutManager,
@@ -261,10 +230,8 @@ extension NativeTextViewCoordinator {
     /// with it. Returns false if the stack no longer matches the text.
     func restoreWarmDocument(_ warm: WarmDocument, into textView: NativeTextView, expecting text: String) -> Bool {
         guard warm.storageText == text else {
-            // The commonest real cause is that the app hands `text` in a form that
-            // differs from the stored `lastSyncedText` — a trailing newline, or a
-            // rename sweep having rewritten the file meanwhile. Print enough to
-            // tell those apart without another round trip.
+            // Usually a trailing-newline difference or a rename sweep having
+            // rewritten the file; the trace distinguishes them.
             let stored = warm.storageText
             let common = zip(stored, text).prefix { $0 == $1 }.count
             PerfTrace.stamp("warmSwap.rejected", 0,
@@ -278,9 +245,8 @@ extension NativeTextViewCoordinator {
         textView.activeBottomOverscroll = warm.activeBottomOverscroll
         textView.lastFullMeasure = warm.lastFullMeasure
 
-        // Required. Repointing the container does NOT schedule a viewport pass:
-        // without this the old document's pixels stay on screen and `viewportRange`
-        // reads nil, which looks exactly like the swap silently failing.
+        // Required: repointing the container schedules no viewport pass, so
+        // without this the old document's pixels stay on screen.
         warm.layoutManager.textViewportLayoutController.layoutViewport()
         return true
     }

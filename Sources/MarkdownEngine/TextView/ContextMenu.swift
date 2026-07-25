@@ -6,22 +6,16 @@
 //
 //  Right-click menu with toggleable Markdown formatting actions.
 //
-//  These handlers MUST NOT publish the binding themselves. `didChangeText()`
-//  runs `textDidChange` synchronously, which reconstructs the STORAGE form and
-//  enqueues `self.text = storageState.storage` (Coordinator/+TextDelegate.swift).
-//  A handler that then enqueues `self.text = tv.string` lands second on the same
-//  serial main queue and wins — and `tv.string` is the DISPLAY form, in which
-//  `makeDisplayState` has moved every `|UUID` out of the text and into metadata
-//  (Services/WikiLinkService.swift). Every wiki link in the note becomes a bare
-//  `[[Name]]`, and the embedder writes that to disk.
+//  Two rules here, both learned from silent data loss (25.07.26):
 //
-//  It is also unrecoverable within the session: the display-form write does not
-//  update `lastSyncedText`, so the next `updateNSView` fails its early-out and
-//  rebuilds treating display as storage.
-//
-//  Eight handlers did exactly this until 25.07.26. `wrapSelection` and
-//  `insertEmptyMarkers` never did — which is why "select text, then Bold" was
-//  safe while caret-only Bold was not, and why it went unnoticed for so long.
+//  1. Never publish the binding. `didChangeText()` already enqueues the STORAGE
+//     form; a handler enqueueing `self.text = tv.string` lands second on the
+//     same queue and wins — and `tv.string` is the DISPLAY form, where every
+//     `|UUID` has been moved out of the text into metadata.
+//  2. Never rewrite retained text. Rebuilding a span from `tv.string` and
+//     writing it back destroys `.wikiLinkID` on anything inside it, which is the
+//     only copy of a link's UUID once its metadata range shifts. Use
+//     `replacePreservingAttributes` or edit only the characters that change.
 //
 
 import Cocoa
@@ -128,23 +122,13 @@ extension NativeTextViewWrapper.Coordinator {
             && NSMaxRange(selection) <= NSMaxRange(token.range)
     }
 
-    /// Replaces the marker characters of an emphasis token with `replacement` on each side, preserving the inner content.
-    /// Replace `range` with `newText`, carrying the ATTRIBUTES of `retained`
+    /// Replace `range` with `newText`, carrying the attributes of `retained`
     /// onto its new home at `newOffset` within `newText`.
     ///
-    /// Every formatting action here rebuilds a span of text out of `tv.string`
-    /// and writes it back. `tv.string` is the display form and carries no
-    /// attributes, so a plain replacement silently destroys everything the
-    /// styler put on the text it retained — including `.wikiLinkID`, which is
-    /// the only copy of a wiki link's UUID once its metadata range has shifted.
-    /// The result is a bare `[[Name]]` written to disk (see the file header).
-    ///
     /// `retained` is a subrange of the CURRENT storage whose characters survive
-    /// the edit verbatim; `newOffset` is where those characters start in
-    /// `newText`. Callers that only add or remove markers around existing text
-    /// always have both.
+    /// verbatim. See the file header for why a plain replacement is unsafe.
     /// Returns false when the text view refused the edit, so callers can skip
-    /// their selection update instead of pointing it at text that never changed.
+    /// their selection update.
     @discardableResult
     private func replacePreservingAttributes(
         in range: NSRange,
@@ -391,18 +375,9 @@ extension NativeTextViewWrapper.Coordinator {
         wrapSelection(with: "`")
     }
 
-    /// Toggles the `> ` prefix by editing only the prefix itself.
-    ///
-    /// It used to replace the WHOLE line with `"> " + originalLine`, where
-    /// `originalLine` came from `tv.string` — the display form. Any wiki link on
-    /// that line was therefore rewritten as its display text, which destroys the
-    /// `.wikiLinkID` attribute carrying its UUID and invalidates the metadata
-    /// range keyed on where the link used to be. `makeStorageState` then had no
-    /// copy of the UUID left and wrote a bare `[[Name]]` to disk.
-    ///
-    /// Touching only the two prefix characters leaves every attribute on the
-    /// rest of the line — links, image embeds, task checkboxes — untouched,
-    /// which is also simply what the operation means.
+    /// Toggles the `> ` prefix by editing only the prefix, leaving every
+    /// attribute on the rest of the line untouched. It used to replace the whole
+    /// line to add two characters, which is how it stripped wiki-link UUIDs.
     @objc func didMarkdownBlockquote(_ sender: Any?) {
         guard let tv = textView else { return }
         let nsText = tv.string as NSString

@@ -439,23 +439,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 context.coordinator.undoManagers.removeValue(forKey: key)
                 context.coordinator.undoContentSnapshots.removeValue(forKey: key)
             }
-            // Deliberately NOT the warm pool. Pruning it against this set was
-            // tried and reverted: the set is the embedder's TAB STRIP, which
-            // churns — navigating to a non-document surface and opening a note
-            // reorders it — and every churn emptied the pool. Measured: two
-            // consecutive `warmSwap.miss have=none` right after such a detour,
-            // the second costing 705 ms on a 346 KB note that had been warm
-            // moments earlier.
-            //
-            // It bought nothing either. The pool is already bounded by
-            // `WarmDocumentPolicy` on both document count and retained text, and
-            // that — not the tab strip — is the memory guarantee. Pruning on top
-            // could only make the pool smaller than its own budget, i.e. trade
-            // hits for memory that was never at risk.
-            //
-            // `WarmDocumentPool.prune(keeping:current:)` still exists for an
-            // embedder that genuinely needs to release a document early (a
-            // closed window, a deleted file).
+            // Deliberately NOT the warm pool: this set is the embedder's tab
+            // strip, which churns, and pruning against it emptied the pool on
+            // every detour (measured: 705 ms for a note that had just been warm).
+            // `WarmDocumentPolicy` already bounds the pool — that, not the tab
+            // strip, is the memory guarantee.
         }
 
         let wtActive: Bool = {
@@ -619,15 +607,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // across a file switch.
             textView.breakUndoCoalescing()
 
-            // Warm switch: claim the INCOMING document's stack out of the pool
-            // first, then put the outgoing one in. Taking before storing keeps
-            // the two independent — otherwise storing the outgoing document
-            // could evict the incoming one in the same breath.
-            // Skipped entirely unless the embedder opts in.
+            // Take the INCOMING stack out of the pool before storing the
+            // outgoing one, or storing could evict the incoming one first.
             var incomingWarm: WarmDocument?
             if configuration.warmDocuments.isEnabled {
-                // Adopt the embedder's bounds before anything is stored, so a
-                // shrunk pool trims here rather than one switch later.
+                // Before storing, so a shrunk policy trims now not next switch.
                 context.coordinator.warmDocuments.apply(configuration.warmDocuments)
                 incomingWarm = context.coordinator.warmDocuments.take(documentId)
                 if incomingWarm == nil {

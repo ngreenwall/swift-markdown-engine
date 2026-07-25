@@ -4,26 +4,18 @@
 //
 //  Created by Luca Chen on 25.07.26.
 //
-//  Everything the coordinator knows that belongs to the DOCUMENT rather than to
-//  the text view.
+//  Everything the coordinator knows that belongs to the DOCUMENT rather than the
+//  text view. One NSTextView serves every tab, so this used to live on the
+//  coordinator — fine while a switch discarded the old document, fatal once two
+//  are alive: `lastComputedStorage` is the writeback splice base, and restoring
+//  text without it writes A's content spliced with B's edit to disk.
 //
-//  The editor has one NSTextView for every open tab, so all of this used to live
-//  directly on the coordinator — one document's state wearing a singleton's
-//  clothes. That is survivable while a switch throws the old document away
-//  wholesale, and fatal the moment two documents are alive at once: the fields
-//  below include `lastComputedStorage`, the splice base for the incremental
-//  writeback. A swap that restored the text but not the splice base would write
-//  document A's content spliced with document B's edit to disk, silently.
+//  One object rather than save/restore of individual fields, so a swap is a
+//  single assignment and a new field cannot be forgotten. The coordinator keeps
+//  forwarding properties, so call sites are unchanged.
 //
-//  Hence one object rather than a save/restore of individual fields: swapping a
-//  document becomes a single assignment, and no future field can be forgotten,
-//  because adding it here makes it travel automatically. The coordinator keeps
-//  forwarding properties so existing call sites are unchanged.
-//
-//  What deliberately does NOT live here: state that belongs to the view or the
-//  session rather than the document — WritingTools bookkeeping, spell-checking
-//  preferences, drag-select flags, the first responder, find state. Those stay
-//  correct across a document swap precisely because they do not travel.
+//  NOT here: view- or session-scoped state (WritingTools, spell-checking, drag
+//  flags, first responder, find) — it stays correct by NOT travelling.
 //
 
 import AppKit

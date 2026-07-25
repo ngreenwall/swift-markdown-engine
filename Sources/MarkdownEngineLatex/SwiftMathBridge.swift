@@ -118,23 +118,7 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         return (r << 16) | (g << 8) | b
     }
 
-#if DEBUG
-    // TEMP (#1010): splits a formula render into the part that produces its SIZE
-    // (parse + SwiftMath layout) and the part that produces its IMAGE (probe
-    // raster + ink scan + crop). Layout only needs the size; drawing is
-    // viewport-only (6 fragments per switch). If the raster half dominates, it
-    // can be deferred to first draw — if the size half does, it cannot.
-    // Prints a running split every 50 renders. Remove with the other probes.
-    private static var probeSizeMs = 0.0
-    private static var probeRasterMs = 0.0
-    private static var probeCount = 0
-    private static let probeEnabled = ProcessInfo.processInfo.environment["MD_PERF"] != "0"
-#endif
-
     private func renderLatex(_ latex: String, fontSize: CGFloat, textColor: NSColor) -> CacheEntry? {
-#if DEBUG
-        let probeT0 = DispatchTime.now().uptimeNanoseconds
-#endif
         let mathLabel = MTMathUILabel()
         mathLabel.latex = latex
         mathLabel.fontSize = fontSize
@@ -173,13 +157,6 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         // Render with right slack, then crop to the measured ink edge.
         let rightSlack = ceil(fontSize)
         let probeWidth = ceil(exactWidth) + rightSlack
-#if DEBUG
-        // Everything above this line produced the SIZE; everything below produces
-        // the IMAGE. The boundary is exact: `exactWidth`/`canvasHeight` are already
-        // final here, only the ink-width crop still needs pixels.
-        let probeSizeDone = DispatchTime.now().uptimeNanoseconds
-#endif
-
         guard let probeRep = renderLabelToRep(mathLabel, size: CGSize(width: probeWidth, height: canvasHeight)),
               let probeCG = probeRep.cgImage else {
             return nil
@@ -203,18 +180,6 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         let image = NSImage(size: finalSize)
         image.addRepresentation(finalRep)
 
-#if DEBUG
-        if Self.probeEnabled {
-            let end = DispatchTime.now().uptimeNanoseconds
-            Self.probeSizeMs += Double(probeSizeDone - probeT0) / 1_000_000
-            Self.probeRasterMs += Double(end - probeSizeDone) / 1_000_000
-            Self.probeCount += 1
-            if Self.probeCount % 50 == 0 {
-                print(String(format: "⏱️ PERF latexRender ×%d | size=%.1fms raster=%.1fms",
-                             Self.probeCount, Self.probeSizeMs, Self.probeRasterMs))
-            }
-        }
-#endif
         return CacheEntry(
             image: image,
             size: finalSize,

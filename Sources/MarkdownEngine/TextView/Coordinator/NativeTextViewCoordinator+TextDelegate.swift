@@ -306,23 +306,11 @@ extension NativeTextViewCoordinator {
 
     public func textViewDidChangeSelection(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView else { return }
-        // Mid-rebuild the caret has not moved — `textView.string = …` reset it,
-        // and the rebuild recomputes everything this handler would: the caret
-        // reveal, `activeTokenIndices` and the wiki-link active state are all
-        // derived again a few lines later in `rebuildTextStorageAndStyle`.
-        // Meanwhile the work here is O(document): a full `tv.string` bridge, a
-        // parse of the freshly assigned text, and a token scan — against a
-        // storage that has no attributes yet.
-        //
-        // Measured on a 346 KB note: the whole rebuild goes 1,344 ms → 1,128 ms.
-        // It is the largest single item found on the open path, and it was
-        // invisible in every earlier measurement because those harnesses never
-        // attached a delegate — so the handler never fired and the cost was
-        // simply absent from the numbers.
-        //
-        // The caret-derived state this handler owns is reset explicitly at the
-        // end of `rebuildTextStorageAndStyle` instead; without that, a wiki link
-        // active in the outgoing document stays active in the incoming one.
+        // Mid-rebuild the caret has not moved — assigning the string reset it —
+        // and everything this handler derives is recomputed by the rebuild a few
+        // lines later. The work here is O(document) against a storage with no
+        // attributes yet: measured 1,344 ms → 1,128 ms on a 346 KB note.
+        // `rebuildTextStorageAndStyle` resets the caret-derived state instead.
         if isRebuildingDocument { return }
         // Raw mode: plain source — no reveal, snap-back, or inline previews.
         if configuration.rawSourceMode { return }
