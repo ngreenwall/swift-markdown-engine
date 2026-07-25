@@ -6,6 +6,23 @@
 //
 //  Right-click menu with toggleable Markdown formatting actions.
 //
+//  These handlers MUST NOT publish the binding themselves. `didChangeText()`
+//  runs `textDidChange` synchronously, which reconstructs the STORAGE form and
+//  enqueues `self.text = storageState.storage` (Coordinator/+TextDelegate.swift).
+//  A handler that then enqueues `self.text = tv.string` lands second on the same
+//  serial main queue and wins — and `tv.string` is the DISPLAY form, in which
+//  `makeDisplayState` has moved every `|UUID` out of the text and into metadata
+//  (Services/WikiLinkService.swift). Every wiki link in the note becomes a bare
+//  `[[Name]]`, and the embedder writes that to disk.
+//
+//  It is also unrecoverable within the session: the display-form write does not
+//  update `lastSyncedText`, so the next `updateNSView` fails its early-out and
+//  rebuilds treating display as storage.
+//
+//  Eight handlers did exactly this until 25.07.26. `wrapSelection` and
+//  `insertEmptyMarkers` never did — which is why "select text, then Bold" was
+//  safe while caret-only Bold was not, and why it went unnoticed for so long.
+//
 
 import Cocoa
 import SwiftUI
@@ -112,17 +129,59 @@ extension NativeTextViewWrapper.Coordinator {
     }
 
     /// Replaces the marker characters of an emphasis token with `replacement` on each side, preserving the inner content.
+    /// Replace `range` with `newText`, carrying the ATTRIBUTES of `retained`
+    /// onto its new home at `newOffset` within `newText`.
+    ///
+    /// Every formatting action here rebuilds a span of text out of `tv.string`
+    /// and writes it back. `tv.string` is the display form and carries no
+    /// attributes, so a plain replacement silently destroys everything the
+    /// styler put on the text it retained — including `.wikiLinkID`, which is
+    /// the only copy of a wiki link's UUID once its metadata range has shifted.
+    /// The result is a bare `[[Name]]` written to disk (see the file header).
+    ///
+    /// `retained` is a subrange of the CURRENT storage whose characters survive
+    /// the edit verbatim; `newOffset` is where those characters start in
+    /// `newText`. Callers that only add or remove markers around existing text
+    /// always have both.
+    /// Returns false when the text view refused the edit, so callers can skip
+    /// their selection update instead of pointing it at text that never changed.
+    @discardableResult
+    private func replacePreservingAttributes(
+        in range: NSRange,
+        with newText: String,
+        retaining retained: NSRange,
+        at newOffset: Int
+    ) -> Bool {
+        guard let tv = textView, let storage = tv.textStorage else { return false }
+        guard tv.shouldChangeText(in: range, replacementString: newText) else { return false }
+
+        let replacement = NSMutableAttributedString(string: newText, attributes: tv.typingAttributes)
+        let carried = storage.attributedSubstring(from: retained)
+        let target = NSRange(location: newOffset, length: carried.length)
+        // Defensive: a caller that miscomputes the offset would corrupt the
+        // document rather than merely lose styling, so fall back to the plain
+        // replacement instead of trapping on a bad range.
+        if NSMaxRange(target) <= replacement.length {
+            replacement.replaceCharacters(in: target, with: carried)
+        }
+        storage.replaceCharacters(in: range, with: replacement)
+        tv.didChangeText()
+        return true
+    }
+
     private func unwrapToken(_ token: MarkdownToken, leftReplacement: String, rightReplacement: String) {
         guard let tv = textView else { return }
         let nsText = tv.string as NSString
         let content = nsText.substring(with: token.contentRange)
         let newText = leftReplacement + content + rightReplacement
-        if tv.shouldChangeText(in: token.range, replacementString: newText) {
-            tv.replaceCharacters(in: token.range, with: newText)
-            tv.didChangeText()
-            let newSelectionLocation = token.range.location + leftReplacement.count
-            tv.setSelectedRange(NSRange(location: newSelectionLocation, length: content.count))
-        }
+        guard replacePreservingAttributes(
+            in: token.range,
+            with: newText,
+            retaining: token.contentRange,
+            at: (leftReplacement as NSString).length
+        ) else { return }
+        let newSelectionLocation = token.range.location + leftReplacement.count
+        tv.setSelectedRange(NSRange(location: newSelectionLocation, length: content.count))
     }
 
     func isSelectionHeading(level: Int, in nsText: NSString, range: NSRange) -> Bool {
@@ -161,12 +220,20 @@ extension NativeTextViewWrapper.Coordinator {
         // merge the line with the next one (mirrors applyList's suffix handling).
         let suffix = originalLine.hasSuffix("\n") ? "\n" : ""
         let newLine = prefix + content + suffix
-        if tv.shouldChangeText(in: lineRange, replacementString: newLine) {
-            tv.replaceCharacters(in: lineRange, with: newLine)
-            tv.didChangeText()
-            let newSel = NSRange(location: lineRange.location + prefix.count, length: content.count)
-            tv.setSelectedRange(newSel)
-        }
+        // `content` is a verbatim slice of the line — locate it so its styling,
+        // and any wiki link inside it, survives the rewrite.
+        let contentRange = (originalLine as NSString).range(of: content)
+        let retained = contentRange.location == NSNotFound
+            ? NSRange(location: lineRange.location, length: 0)
+            : NSRange(location: lineRange.location + contentRange.location, length: contentRange.length)
+        guard replacePreservingAttributes(
+            in: lineRange,
+            with: newLine,
+            retaining: retained,
+            at: (prefix as NSString).length
+        ) else { return }
+        let newSel = NSRange(location: lineRange.location + prefix.count, length: content.count)
+        tv.setSelectedRange(newSel)
     }
 
     @objc func didMarkdownHeading(_ sender: NSMenuItem) {
@@ -187,12 +254,20 @@ extension NativeTextViewWrapper.Coordinator {
         let newLine = prefix + content
         let suffix = originalLine.hasSuffix("\n") ? "\n" : ""
         let replacement = newLine + suffix
-        if tv.shouldChangeText(in: startLine, replacementString: replacement) {
-            tv.replaceCharacters(in: startLine, with: replacement)
-            tv.didChangeText()
-            let newSel = NSRange(location: startLine.location + prefix.count, length: content.count)
-            tv.setSelectedRange(newSel)
-        }
+        // See applyHeading: `content` survives verbatim, so its attributes must
+        // travel with it or a wiki link on this line loses its UUID.
+        let contentRange = (originalLine as NSString).range(of: content)
+        let retained = contentRange.location == NSNotFound
+            ? NSRange(location: startLine.location, length: 0)
+            : NSRange(location: startLine.location + contentRange.location, length: contentRange.length)
+        guard replacePreservingAttributes(
+            in: startLine,
+            with: replacement,
+            retaining: retained,
+            at: (prefix as NSString).length
+        ) else { return }
+        let newSel = NSRange(location: startLine.location + prefix.count, length: content.count)
+        tv.setSelectedRange(newSel)
     }
 
     @objc func didMarkdownUnorderedList(_ sender: Any?) {
@@ -316,6 +391,18 @@ extension NativeTextViewWrapper.Coordinator {
         wrapSelection(with: "`")
     }
 
+    /// Toggles the `> ` prefix by editing only the prefix itself.
+    ///
+    /// It used to replace the WHOLE line with `"> " + originalLine`, where
+    /// `originalLine` came from `tv.string` — the display form. Any wiki link on
+    /// that line was therefore rewritten as its display text, which destroys the
+    /// `.wikiLinkID` attribute carrying its UUID and invalidates the metadata
+    /// range keyed on where the link used to be. `makeStorageState` then had no
+    /// copy of the UUID left and wrote a bare `[[Name]]` to disk.
+    ///
+    /// Touching only the two prefix characters leaves every attribute on the
+    /// rest of the line — links, image embeds, task checkboxes — untouched,
+    /// which is also simply what the operation means.
     @objc func didMarkdownBlockquote(_ sender: Any?) {
         guard let tv = textView else { return }
         let nsText = tv.string as NSString
@@ -324,23 +411,19 @@ extension NativeTextViewWrapper.Coordinator {
         let originalLine = nsText.substring(with: lineRange)
 
         if originalLine.hasPrefix("> ") {
-            let stripped = String(originalLine.dropFirst(2))
-            let needsNewline = originalLine.hasSuffix("\n") && !stripped.hasSuffix("\n")
-            let replacement = stripped + (needsNewline ? "\n" : "")
-            if tv.shouldChangeText(in: lineRange, replacementString: replacement) {
-                tv.replaceCharacters(in: lineRange, with: replacement)
+            let prefixRange = NSRange(location: lineRange.location, length: 2)
+            if tv.shouldChangeText(in: prefixRange, replacementString: "") {
+                tv.replaceCharacters(in: prefixRange, with: "")
                 tv.didChangeText()
                 let newLoc = max(lineRange.location, range.location - 2)
                 tv.setSelectedRange(NSRange(location: newLoc, length: 0))
-                DispatchQueue.main.async { self.text = tv.string }
             }
         } else {
-            let newLine = "> " + originalLine
-            if tv.shouldChangeText(in: lineRange, replacementString: newLine) {
-                tv.replaceCharacters(in: lineRange, with: newLine)
+            let insertRange = NSRange(location: lineRange.location, length: 0)
+            if tv.shouldChangeText(in: insertRange, replacementString: "> ") {
+                tv.replaceCharacters(in: insertRange, with: "> ")
                 tv.didChangeText()
-                tv.setSelectedRange(NSRange(location: lineRange.location + 2, length: range.length))
-                DispatchQueue.main.async { self.text = tv.string }
+                tv.setSelectedRange(NSRange(location: range.location + 2, length: range.length))
             }
         }
     }
@@ -354,19 +437,20 @@ extension NativeTextViewWrapper.Coordinator {
             let nsText = tv.string as NSString
             let selected = nsText.substring(with: range)
             let newText = "[\(selected)](\(url))"
-            if tv.shouldChangeText(in: range, replacementString: newText) {
-                tv.replaceCharacters(in: range, with: newText)
-                tv.didChangeText()
-                tv.setSelectedRange(NSRange(location: range.location + newText.count, length: 0))
-                DispatchQueue.main.async { self.text = tv.string }
-            }
+            // The selected text becomes the link label and survives verbatim.
+            guard replacePreservingAttributes(
+                in: range,
+                with: newText,
+                retaining: range,
+                at: 1 // past the opening "["
+            ) else { return }
+            tv.setSelectedRange(NSRange(location: range.location + newText.count, length: 0))
         } else {
             let insertion = "[](\(url))"
             if tv.shouldChangeText(in: range, replacementString: insertion) {
                 tv.replaceCharacters(in: range, with: insertion)
                 tv.didChangeText()
                 tv.setSelectedRange(NSRange(location: range.location + 1, length: 0))
-                DispatchQueue.main.async { self.text = tv.string }
             }
         }
     }
@@ -383,7 +467,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let cursorLoc = range.location + prefix.count + 4
             tv.setSelectedRange(NSRange(location: cursorLoc, length: 0))
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -399,7 +482,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let cursorLoc = range.location + insertion.count
             tv.setSelectedRange(NSRange(location: cursorLoc, length: 0))
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -412,7 +494,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.replaceCharacters(in: range, with: insertion)
             tv.didChangeText()
             tv.setSelectedRange(NSRange(location: range.location + insertion.count, length: 0))
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -424,12 +505,13 @@ extension NativeTextViewWrapper.Coordinator {
         let nsText = tv.string as NSString
         let original = nsText.substring(with: range)
         let newText = marker + original + marker
-        if tv.shouldChangeText(in: range, replacementString: newText) {
-            tv.replaceCharacters(in: range, with: newText)
-            tv.didChangeText()
-            tv.setSelectedRange(NSRange(location: range.location + marker.count + cursorOffset, length: 0))
-            DispatchQueue.main.async { self.text = tv.string }
-        }
+        guard replacePreservingAttributes(
+            in: range,
+            with: newText,
+            retaining: range,
+            at: (marker as NSString).length
+        ) else { return }
+        tv.setSelectedRange(NSRange(location: range.location + marker.count + cursorOffset, length: 0))
     }
 
     private func insertEmptyMarkers(_ marker: String) {
@@ -456,12 +538,18 @@ extension NativeTextViewWrapper.Coordinator {
         let leading = String(original[..<coreStart])
         let trailing = String(original[coreEnd...])
         let newText = leading + marker + core + marker + trailing
-        if tv.shouldChangeText(in: range, replacementString: newText) {
-            tv.replaceCharacters(in: range, with: newText)
-            tv.didChangeText()
-            let newRange = NSRange(location: range.location + leadingWS + marker.count, length: core.count)
-            tv.setSelectedRange(newRange)
-        }
+        // Only the markers are new; `core` is the user's text and keeps its
+        // attributes, including a wiki link's UUID if the selection spans one.
+        let coreOldRange = NSRange(location: range.location + (leading as NSString).length,
+                                   length: (core as NSString).length)
+        guard replacePreservingAttributes(
+            in: range,
+            with: newText,
+            retaining: coreOldRange,
+            at: (leading as NSString).length + (marker as NSString).length
+        ) else { return }
+        let newRange = NSRange(location: range.location + leadingWS + marker.count, length: core.count)
+        tv.setSelectedRange(newRange)
     }
 }
 
