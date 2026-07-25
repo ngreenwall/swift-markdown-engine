@@ -611,9 +611,12 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // first, then put the outgoing one in. Taking before storing keeps
             // the two independent — otherwise storing the outgoing document
             // could evict the incoming one in the same breath.
-            // Skipped entirely unless MD_WARM_SWITCH=1.
+            // Skipped entirely unless the embedder opts in.
             var incomingWarm: WarmDocument?
-            if configuration.warmDocumentSwitching {
+            if configuration.warmDocuments.isEnabled {
+                // Adopt the embedder's bounds before anything is stored, so a
+                // shrunk pool trims here rather than one switch later.
+                context.coordinator.warmDocuments.apply(configuration.warmDocuments)
                 incomingWarm = context.coordinator.warmDocuments.take(documentId)
                 if incomingWarm == nil {
                     PerfTrace.stamp("warmSwap.miss", 0,
@@ -643,7 +646,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             } else {
                 // Not warm: give the incoming document its own stack, so the one
                 // just captured keeps its layout instead of being written over.
-                if configuration.warmDocumentSwitching {
+                if configuration.warmDocuments.isEnabled {
                     let (storage, layoutManager, container) = context.coordinator.makeTextKitStack()
                     _ = storage
                     _ = layoutManager

@@ -105,6 +105,36 @@ struct WarmDocumentPoolTests {
         #expect(pool.take("b") != nil) // and "b" was not pushed out by the duplicate
     }
 
+    @Test("Adopting a smaller policy trims immediately, not one switch later")
+    func applyShrinksNow() {
+        let pool = WarmDocumentPool(maxDocuments: 5, maxRetainedCharacters: 1_000_000)
+        for id in ["a", "b", "c", "d", "e"] {
+            pool.store(makeDocument(id: id, characters: 100))
+        }
+
+        pool.apply(WarmDocumentPolicy(isEnabled: true, maxDocuments: 2, maxCharacters: 1_000_000))
+
+        #expect(pool.take("a") == nil)
+        #expect(pool.take("b") == nil)
+        #expect(pool.take("c") == nil)
+        #expect(pool.take("d") != nil) // the two most recent survive
+        #expect(pool.take("e") != nil)
+    }
+
+    @Test("A larger policy takes effect without discarding what is held")
+    func applyGrowsWithoutLoss() {
+        let pool = WarmDocumentPool(maxDocuments: 2, maxRetainedCharacters: 1_000_000)
+        pool.store(makeDocument(id: "a", characters: 100))
+        pool.store(makeDocument(id: "b", characters: 100))
+
+        pool.apply(WarmDocumentPolicy(isEnabled: true, maxDocuments: 6, maxCharacters: 1_000_000))
+        pool.store(makeDocument(id: "c", characters: 100))
+
+        #expect(pool.take("a") != nil)
+        #expect(pool.take("b") != nil)
+        #expect(pool.take("c") != nil)
+    }
+
     @Test("Pruning drops documents the embedder no longer retains")
     func pruneDropsUnretained() {
         // Without this the pool is a leak with a very large constant: a closed

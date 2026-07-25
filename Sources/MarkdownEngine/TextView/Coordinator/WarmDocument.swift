@@ -80,6 +80,47 @@ final class WarmDocument {
 
 }
 
+/// Whether documents keep their laid-out TextKit 2 stack across a switch, and
+/// how many may be held.
+///
+/// Measured on a 346 KB / 7,715-paragraph note: 723 ms to rebuild against 5–15
+/// ms to restore, with not one layout fragment re-created. The price is memory —
+/// roughly 66–95 MB of retained layout for a document that size — so it is
+/// opt-in, and bounded on both count and total retained text. Embedders whose
+/// notes are all small gain little and should leave it off.
+public struct WarmDocumentPolicy: Sendable {
+    public var isEnabled: Bool
+
+    /// Upper bound on documents held.
+    ///
+    /// An embedder with a tab strip usually wants this to equal the number of
+    /// tabs: a tab the user can click is a document they can switch back to, and
+    /// a pool smaller than the strip guarantees that some of those clicks pay a
+    /// full rebuild. Below that, size it by how far back people actually go.
+    public var maxDocuments: Int
+
+    /// Upper bound on total retained TEXT across the pool.
+    ///
+    /// A second bound is needed because neither measure alone is honest: a count
+    /// ignores that one 346 KB note costs more than twenty ordinary ones, while
+    /// text length is only a proxy for the real cost — retained layout, which is
+    /// dominated by rendered elements rather than by characters. There is no
+    /// cheap way to ask TextKit what a laid-out document weighs, so this bounds
+    /// the two things that can be measured, conservatively.
+    ///
+    /// A document that exceeds this on its own is still admitted; refusing it
+    /// would leave the slowest case the only one that never benefits.
+    public var maxCharacters: Int
+
+    public init(isEnabled: Bool = false, maxDocuments: Int = 3, maxCharacters: Int = 600_000) {
+        self.isEnabled = isEnabled
+        self.maxDocuments = maxDocuments
+        self.maxCharacters = maxCharacters
+    }
+
+    public static let disabled = WarmDocumentPolicy()
+}
+
 /// A small least-recently-used set of documents kept laid out.
 ///
 /// One slot is not enough for how people actually move: it makes A↔B free and
@@ -99,12 +140,27 @@ final class WarmDocumentPool {
     /// Least-recently-used first, so eviction is `removeFirst()`.
     private var documents: [WarmDocument] = []
 
-    private let maxDocuments: Int
-    private let maxRetainedCharacters: Int
+    /// Bounds, not constants: the embedder sets them through
+    /// ``WarmDocumentPolicy`` and may change them at runtime (a tab-strip size
+    /// is a user-visible setting in some apps). Applied on the next `store`.
+    var maxDocuments: Int
+    var maxRetainedCharacters: Int
 
     init(maxDocuments: Int = 3, maxRetainedCharacters: Int = 600_000) {
         self.maxDocuments = maxDocuments
         self.maxRetainedCharacters = maxRetainedCharacters
+    }
+
+    /// Adopt the embedder's bounds, trimming immediately if they shrank.
+    func apply(_ policy: WarmDocumentPolicy) {
+        guard maxDocuments != policy.maxDocuments || maxRetainedCharacters != policy.maxCharacters else { return }
+        maxDocuments = max(1, policy.maxDocuments)
+        maxRetainedCharacters = max(1, policy.maxCharacters)
+        while documents.count > maxDocuments { documents.removeFirst() }
+        while documents.count > 1,
+              documents.reduce(0, { $0 + $1.retainedCharacters }) > maxRetainedCharacters {
+            documents.removeFirst()
+        }
     }
 
     /// Remove and return the stack held for `documentId`, if any.
