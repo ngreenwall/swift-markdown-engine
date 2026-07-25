@@ -116,9 +116,9 @@ struct TextStylingService {
             textView.textStorage?.removeAttribute(.link, range: paragraph)
             for (range, attrs) in styledRanges where NSIntersectionRange(range, paragraph).length > 0 {
                 let clippedRange = NSIntersectionRange(range, paragraph)
-                for (key, value) in attrs {
-                    textView.textStorage?.addAttribute(key, value: value, range: clippedRange)
-                }
+                // Plural form: same result, one message per range instead of one
+                // per (range, key). This is the per-keystroke restyle path.
+                textView.textStorage?.addAttributes(attrs, range: clippedRange)
             }
         }
         textView.textStorage?.endEditing()

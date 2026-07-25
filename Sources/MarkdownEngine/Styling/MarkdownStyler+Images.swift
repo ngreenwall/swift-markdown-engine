@@ -21,7 +21,7 @@ extension MarkdownStyler {
     static func styleImageLinks(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
         for (idx, token) in ctx.scoped(ctx.imageLinkIndexed) {
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
+            if ctx.isInCode(token.range) { continue }
 
             // The URL lives between markerRanges[2] ('(') and markerRanges[3] (')').
             guard token.markerRanges.count >= 4 else {
@@ -115,7 +115,7 @@ extension MarkdownStyler {
     static func styleImageEmbeds(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
         for (idx, token) in ctx.scoped(ctx.imageEmbedIndexed) {
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
+            if ctx.isInCode(token.range) { continue }
 
             let isActive = ctx.activeTokenIndices.contains(idx)
             let rawContent = ctx.nsText.substring(with: token.contentRange)  // = display name (no suffix)

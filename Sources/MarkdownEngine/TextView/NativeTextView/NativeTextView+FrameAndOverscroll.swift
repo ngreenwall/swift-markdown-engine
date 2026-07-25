@@ -20,7 +20,11 @@ extension NativeTextView {
     func recalcOverscroll(
         for scrollView: NSScrollView,
         targetWidth: CGFloat? = nil,
-        debugTag: String = "?"
+        debugTag: String = "?",
+        // Labelling only — `debugTag` still decides whether the full layout is
+        // armed below, so a probe tag can be added to a call site without
+        // changing its behaviour.
+        probeTag: String? = nil
     ) {
         scrollView.contentInsets.bottom = 0
 
@@ -30,7 +34,8 @@ extension NativeTextView {
         let forcedFullLayout = pendingFullLayoutMeasure
         let measured = measuredBaseContentHeight(
             minimumHeight: lineHeight,
-            forceFullLayout: pendingFullLayoutMeasure
+            forceFullLayout: pendingFullLayoutMeasure,
+            probeTag: probeTag ?? debugTag
         )
         let visibleHeight = scrollView.contentView.bounds.height
         let resolvedOverscroll = resolvedOverscroll(
@@ -94,13 +99,27 @@ extension NativeTextView {
         )
     }
 
-    func measuredBaseContentHeight(minimumHeight: CGFloat, forceFullLayout: Bool = false) -> CGFloat {
+    func measuredBaseContentHeight(minimumHeight: CGFloat, forceFullLayout: Bool = false, probeTag: String = "?") -> CGFloat {
         let minimumContentHeight = ceil(max(minimumHeight, 0) + (textContainerInset.height * 2))
         guard let textLayoutManager else { return minimumContentHeight }
 
         // Partial TextKit-2 layout under-measures and oscillates; force full layout only on switch/resize.
+        let contentLength = textStorage?.length ?? 0
+        let containerWidth = textContainer?.size.width ?? 0
         if forceFullLayout {
-            textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+            // Reuse the height from the previous complete measurement when neither
+            // the content nor the wrap width has changed since. This is the same
+            // number, not an estimate — it was produced by a full pass — so the
+            // "partial layout under-measures" hazard above does not apply.
+            if let cached = lastFullMeasure,
+               cached.length == contentLength,
+               abs(cached.width - containerWidth) < 0.5 {
+                PerfTrace.switchCount("fullLayout.reused(\(probeTag))") {}
+                return cached.height
+            }
+            PerfTrace.switchCount("fullLayout(\(probeTag))") {
+                textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+            }
         }
 
         let documentEnd = textLayoutManager.documentRange.endLocation
@@ -184,7 +203,14 @@ extension NativeTextView {
             }
         }
 
-        return max(ceil(rawHeight + (textContainerInset.height * 2)), minimumContentHeight)
+        let measured = max(ceil(rawHeight + (textContainerInset.height * 2)), minimumContentHeight)
+        // Only a forced pass is allowed to seed the cache: an unforced measurement
+        // can be built on estimated fragment positions, which is exactly what must
+        // never be handed to a later caller as if it were authoritative.
+        if forceFullLayout {
+            lastFullMeasure = (length: contentLength, width: containerWidth, height: measured)
+        }
+        return measured
     }
 
     /// Fixed reading-column width = wrap width + horizontal insets on both sides.
@@ -442,8 +468,11 @@ extension NativeTextView {
     func ensureVisibleLayout() {
         guard let tlm = textLayoutManager else { return }
         let visBot = visibleRect.maxY
+        var visited = 0
         tlm.enumerateTextLayoutFragments(from: tlm.documentRange.location, options: [.ensuresLayout]) { fragment in
-            fragment.layoutFragmentFrame.minY <= visBot
+            visited &+= 1
+            return fragment.layoutFragmentFrame.minY <= visBot
         }
+        PerfTrace.switchAdd("ensureVisible.frags", ms: 0, count: visited)
     }
 }

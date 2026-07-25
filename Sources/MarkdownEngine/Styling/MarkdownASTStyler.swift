@@ -68,20 +68,36 @@ enum MarkdownASTStyler {
             wikiLinkID: wikiLinkIDProvider,
             scopedRanges: scopedRanges
         )
-        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                                       registry: configuration.extensionRegistry)
-        var attrs: [StyledRange] = []
-        for block in blocks where ctx.inScope(block.range) {
-            styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
+        // `ast.parse` doubles as a check that `precomputedBlocks` really arrived:
+        // if it is non-nil this is a hand-off and costs ~0, if it shows a full
+        // BlockParser run the caller is not passing the blocks it already has.
+        let blocks = PerfTrace.switchCount("ast.parse") {
+            DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                              registry: configuration.extensionRegistry)
         }
-        shrinkInactiveMarkers(in: blocks, ctx: ctx, into: &attrs)
+        var attrs: [StyledRange] = []
+        PerfTrace.switchCount("ast.blocks") {
+            for block in blocks where ctx.inScope(block.range) {
+                styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
+            }
+        }
+        PerfTrace.switchCount("ast.shrinkMarkers") {
+            shrinkInactiveMarkers(in: blocks, ctx: ctx, into: &attrs)
+        }
 
         // Text/regex passes (AST-agnostic); AST code ranges drive the "skip inside code" checks.
-        let codeRanges = collectCodeRanges(in: blocks)
-        let checkboxRanges = collectCheckboxRanges(in: blocks)
-        let linkRanges = collectLinkRanges(in: blocks)
-        styleAutoLinks(ctx: ctx, codeRanges: codeRanges, linkRanges: linkRanges, into: &attrs)
-        styleIncompleteLinkBrackets(ctx: ctx, codeRanges: codeRanges, checkboxRanges: checkboxRanges, into: &attrs)
+        let codeRanges = PerfTrace.switchCount("ast.collectRanges") { collectCodeRanges(in: blocks) }
+        let checkboxRanges = PerfTrace.switchCount("ast.collectRanges") { collectCheckboxRanges(in: blocks) }
+        let linkRanges = PerfTrace.switchCount("ast.collectRanges") { collectLinkRanges(in: blocks) }
+        // NSDataDetector over `ctx.scanRanges`, which is the WHOLE document unless
+        // scopedRanges was passed.
+        PerfTrace.switchCount("ast.autoLinks") {
+            styleAutoLinks(ctx: ctx, codeRanges: codeRanges, linkRanges: linkRanges, into: &attrs)
+        }
+        // Six NSRegularExpressions, likewise whole-document.
+        PerfTrace.switchCount("ast.linkBrackets") {
+            styleIncompleteLinkBrackets(ctx: ctx, codeRanges: codeRanges, checkboxRanges: checkboxRanges, into: &attrs)
+        }
         return attrs
     }
 
@@ -117,6 +133,46 @@ enum MarkdownASTStyler {
 
     private static func isInCode(_ range: NSRange, _ codeRanges: [NSRange]) -> Bool {
         codeRanges.contains { NSIntersectionRange($0, range).length > 0 }
+    }
+
+    /// Sort + merge into a minimal ascending, non-overlapping set so membership
+    /// becomes a binary search. Merging (not just sorting) keeps the search valid
+    /// even when an inline-code range nests inside a fenced block.
+    private static func mergedSorted(_ ranges: [NSRange]) -> [NSRange] {
+        let sorted = ranges.filter { $0.length > 0 }.sorted { $0.location < $1.location }
+        var merged: [NSRange] = []
+        merged.reserveCapacity(sorted.count)
+        for range in sorted {
+            if let last = merged.last, range.location <= NSMaxRange(last) {
+                let end = max(NSMaxRange(last), NSMaxRange(range))
+                merged[merged.count - 1] = NSRange(location: last.location, length: end - last.location)
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    /// Exactly the predicate `isInCode` used — `NSIntersectionRange(...).length > 0`,
+    /// so a zero-length range never matches — but O(log n) against a merged set.
+    /// The linear form ran 1,594 matches x 191 code ranges on a formula-rich
+    /// 346 KB document.
+    private static func intersectsMerged(_ range: NSRange, _ merged: [NSRange]) -> Bool {
+        guard range.length > 0 else { return false }
+        var low = 0
+        var high = merged.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let candidate = merged[mid]
+            if NSMaxRange(range) <= candidate.location {
+                high = mid - 1
+            } else if range.location >= NSMaxRange(candidate) {
+                low = mid + 1
+            } else {
+                return true
+            }
+        }
+        return false
     }
 
     /// Full ranges of markdown links `[text](url)` and wiki links `[[…]]`. The NSDataDetector
@@ -273,13 +329,18 @@ enum MarkdownASTStyler {
 
     private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], linkRanges: [NSRange], into attrs: inout [StyledRange]) {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
+        // `ctx.text` is a computed `ns as String` — bridging a 346 KB document per
+        // call. Hoist it out of the scan loop.
+        let text = ctx.text
+        let mergedCode = mergedSorted(codeRanges)
+        let mergedLinks = mergedSorted(linkRanges)
         for scan in ctx.scanRanges {
-            detector.enumerateMatches(in: ctx.text, range: scan) { match, _, _ in
+            detector.enumerateMatches(in: text, range: scan) { match, _, _ in
                 // Skip URLs inside code and inside a markdown/wiki link's own range — a link's
                 // `(url)` must not become a second `.link` region competing with the link itself.
                 guard let match, let url = match.url,
-                      !isInCode(match.range, codeRanges),
-                      !isInCode(match.range, linkRanges) else { return }
+                      !intersectsMerged(match.range, mergedCode),
+                      !intersectsMerged(match.range, mergedLinks) else { return }
                 attrs.append((match.range, [.link: url]))
             }
         }
@@ -290,15 +351,27 @@ enum MarkdownASTStyler {
                         #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#]
         let muted = ctx.theme.mutedText
         let faded = ctx.theme.incompleteLink.withAlphaComponent(ctx.config.link.incompleteLinkAlpha)
+        // Hoisted out of the pattern loop: `ctx.text` bridges the whole NSString
+        // to String on every access, and this ran once per pattern per scan range.
+        let text = ctx.text
+        let mergedCode = mergedSorted(codeRanges)
+        let mergedCheckbox = mergedSorted(checkboxRanges)
+        // UTF-16 units, matching the NSRange the regex reports — no substring
+        // allocation per match (pattern 4 alone matches every wiki link).
+        let openBracket: unichar = 0x5B, closeBracket: unichar = 0x5D
+        let openParen: unichar = 0x28, closeParen: unichar = 0x29
         for pattern in patterns {
             guard let re = regex(pattern, false) else { continue }
             for scan in ctx.scanRanges {
-              for m in re.matches(in: ctx.text, options: [], range: scan)
-                  where !isInCode(m.range, codeRanges) && !isInCode(m.range, checkboxRanges) {
-                for (i, ch) in ctx.ns.substring(with: m.range).enumerated() {
-                    let r = NSRange(location: m.range.location + i, length: 1)
-                    let isBracket = ch == "[" || ch == "]" || ch == "(" || ch == ")"
-                    attrs.append((r, [.foregroundColor: isBracket ? muted : faded]))
+              for m in re.matches(in: text, options: [], range: scan)
+                  where !intersectsMerged(m.range, mergedCode) && !intersectsMerged(m.range, mergedCheckbox) {
+                for i in 0..<m.range.length {
+                    let location = m.range.location + i
+                    let unit = ctx.ns.character(at: location)
+                    let isBracket = unit == openBracket || unit == closeBracket
+                        || unit == openParen || unit == closeParen
+                    attrs.append((NSRange(location: location, length: 1),
+                                  [.foregroundColor: isBracket ? muted : faded]))
                 }
               }
             }
@@ -496,7 +569,9 @@ enum MarkdownASTStyler {
         attrs.append((parts.codeRange, [.spellingState: 0]))
         let codeContent = ctx.ns.substring(with: parts.content)
         if !codeContent.isEmpty,
-           let highlighted = ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language) {
+           let highlighted = PerfTrace.switchCount("codeHighlight", {
+               ctx.config.services.syntaxHighlighter.highlight(code: codeContent, language: parts.language)
+           }) {
             highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { a, r, _ in
                 guard let fg = a[.foregroundColor] else { return }
                 attrs.append((NSRange(location: parts.content.location + r.location, length: r.length), [.foregroundColor: fg]))

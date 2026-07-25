@@ -75,6 +75,16 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var didInitialFormatting: Bool = false
     /// One-shot guard so `updateCodeBlockSelection` only forces a full-document layout once per document.
     var didEnsureLayoutForCurrentDocument: Bool = false
+    /// True while `rebuildTextStorageAndStyle` is replacing the document.
+    ///
+    /// Assigning `textView.string` resets the selection, so the selection-change
+    /// delegate fires MID-rebuild — at a point where the new text is in the
+    /// storage but none of its attributes are. Letting the one-shot full-document
+    /// layout run there lays out unstyled text (152 ms on a 346 KB note) that the
+    /// attribute pass immediately invalidates, and the rebuild's own
+    /// `ensureLayout` at the end then redoes it from cold. The rebuild always
+    /// finishes with a full layout, so anything forced before that is waste.
+    var isRebuildingDocument: Bool = false
     var lastSyncedText: String
     var isProgrammaticEdit: Bool = false
     var isWritingToolsActive: Bool = false

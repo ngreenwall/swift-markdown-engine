@@ -150,16 +150,20 @@ extension MarkdownStyler {
         if let cached = tableImageCache.object(forKey: key) {
             return (cached, false)
         }
-        let image = renderTable(
-            parsed,
-            baseFont: ctx.baseFont,
-            theme: ctx.configuration.theme,
-            codeBackgroundColor: ctx.codeBackgroundColor,
-            latex: ctx.services.latex,
-            appearance: appearance,
-            availableWidth: availableWidth,
-            extensions: ctx.configuration.extensions
-        )
+        // Counted only on a cache MISS — the hit path returned above. A warm
+        // switch should therefore show no `tableRender` counter line at all.
+        let image = PerfTrace.switchCount("tableRender") {
+            renderTable(
+                parsed,
+                baseFont: ctx.baseFont,
+                theme: ctx.configuration.theme,
+                codeBackgroundColor: ctx.codeBackgroundColor,
+                latex: ctx.services.latex,
+                appearance: appearance,
+                availableWidth: availableWidth,
+                extensions: ctx.configuration.extensions
+            )
+        }
         tableImageCache.setObject(image, forKey: key)
         return (image, true)
     }

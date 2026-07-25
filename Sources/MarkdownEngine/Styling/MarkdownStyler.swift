@@ -37,6 +37,16 @@ extension MarkdownStyler {
         let nsText: NSString
         let tokens: [MarkdownToken]
         let codeTokens: [MarkdownToken]
+        /// `codeTokens`' ranges, sorted and merged into a minimal non-overlapping
+        /// set, so "is this inside code?" becomes a binary search instead of a
+        /// linear walk of every code token.
+        ///
+        /// The linear form made the inline-LaTeX pass O(#latex × #codeTokens):
+        /// measured at 86 ms for 1,594 formulas against 989 code tokens on a
+        /// 346 KB document — more than the LaTeX rendering it was guarding.
+        /// Merging (rather than plain sorting) is what makes the binary search
+        /// valid even if an inline-code token nests inside a fenced block.
+        let codeRangesMerged: [NSRange]
         let activeTokenIndices: Set<Int>
         let baseFont: NSFont
         let layoutBridge: LayoutBridge?
@@ -54,6 +64,39 @@ extension MarkdownStyler {
         /// which fall back to classifying `tokens` on demand.
         var classified: ClassifiedStyleTokens? = nil
 
+        /// `codeRangesMerged` is derived, never passed in — that way it cannot
+        /// drift out of sync with `codeTokens`.
+        init(
+            nsText: NSString,
+            tokens: [MarkdownToken],
+            codeTokens: [MarkdownToken],
+            activeTokenIndices: Set<Int>,
+            baseFont: NSFont,
+            layoutBridge: LayoutBridge?,
+            baseDefaultLineHeight: CGFloat,
+            codeBackgroundColor: NSColor,
+            latexMarkerFont: NSFont,
+            configuration: MarkdownEditorConfiguration,
+            wikiLinkIDProvider: @escaping (NSRange) -> String?,
+            scopeBounds: (lo: Int, hi: Int)? = nil,
+            classified: ClassifiedStyleTokens? = nil
+        ) {
+            self.nsText = nsText
+            self.tokens = tokens
+            self.codeTokens = codeTokens
+            self.codeRangesMerged = Self.mergedRanges(of: codeTokens)
+            self.activeTokenIndices = activeTokenIndices
+            self.baseFont = baseFont
+            self.layoutBridge = layoutBridge
+            self.baseDefaultLineHeight = baseDefaultLineHeight
+            self.codeBackgroundColor = codeBackgroundColor
+            self.latexMarkerFont = latexMarkerFont
+            self.configuration = configuration
+            self.wikiLinkIDProvider = wikiLinkIDProvider
+            self.scopeBounds = scopeBounds
+            self.classified = classified
+        }
+
         var services: MarkdownEditorServices { configuration.services }
 
         // Per-kind indexed arrays: the cached classification, or a one-off
@@ -66,6 +109,68 @@ extension MarkdownStyler {
 
         static func indexed(_ tokens: [MarkdownToken], _ kind: MarkdownTokenKind) -> [IndexedToken] {
             tokens.enumerated().compactMap { $0.element.kind == kind ? ($0.offset, $0.element) : nil }
+        }
+
+        /// Sort + merge token ranges into a minimal ascending, non-overlapping set.
+        /// O(n log n) once, so the per-token membership tests can be O(log n).
+        static func mergedRanges(of tokens: [MarkdownToken]) -> [NSRange] {
+            let sorted = tokens.map(\.range).sorted { $0.location < $1.location }
+            var merged: [NSRange] = []
+            merged.reserveCapacity(sorted.count)
+            for range in sorted {
+                if let last = merged.last, range.location <= NSMaxRange(last) {
+                    let end = max(NSMaxRange(last), NSMaxRange(range))
+                    merged[merged.count - 1] = NSRange(location: last.location, length: end - last.location)
+                } else {
+                    merged.append(range)
+                }
+            }
+            return merged
+        }
+
+        /// Binary-search equivalent of
+        /// `MarkdownDetection.isInsideCodeBlock(range:codeTokens:)` against a
+        /// merged set. Predicate is identical, including the inclusive
+        /// `location <= end` treatment of a zero-length range.
+        func isInCode(_ range: NSRange) -> Bool {
+            var low = 0
+            var high = codeRangesMerged.count - 1
+            while low <= high {
+                let mid = (low + high) / 2
+                let candidate = codeRangesMerged[mid]
+                let start = candidate.location
+                let end = NSMaxRange(candidate)
+                if range.length == 0 {
+                    if range.location < start { high = mid - 1 }
+                    else if range.location > end { low = mid + 1 }
+                    else { return true }
+                } else {
+                    if NSMaxRange(range) <= start { high = mid - 1 }
+                    else if range.location >= end { low = mid + 1 }
+                    else { return true }
+                }
+            }
+            return false
+        }
+
+        /// The range in a sorted, non-overlapping array that fully encloses
+        /// `range`, or nil. Same predicate as the linear
+        /// `contains(where: { $0.location <= r.location && NSMaxRange(r) <= NSMaxRange($0) })`.
+        static func enclosingRange(_ range: NSRange, in sorted: [NSRange]) -> NSRange? {
+            var low = 0
+            var high = sorted.count - 1
+            while low <= high {
+                let mid = (low + high) / 2
+                let candidate = sorted[mid]
+                if range.location < candidate.location {
+                    high = mid - 1
+                } else if range.location > NSMaxRange(candidate) {
+                    low = mid + 1
+                } else {
+                    return NSMaxRange(range) <= NSMaxRange(candidate) ? candidate : nil
+                }
+            }
+            return nil
         }
 
         /// The slice of a location-sorted, non-overlapping per-kind array that
@@ -168,21 +273,23 @@ enum MarkdownStyler {
         var result: [StyledRange] = []
         // AST-native styler handles everything but NSImage rendering (incl. the composition fixes).
         let astT0 = DispatchTime.now().uptimeNanoseconds
-        result += MarkdownASTStyler.styleAttributes(
-            text: text, fontName: fontName, fontSize: fontSize,
-            caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
-            scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-            configuration: configuration
-        )
+        result += PerfTrace.switchCount("style.ast") {
+            MarkdownASTStyler.styleAttributes(
+                text: text, fontName: fontName, fontSize: fontSize,
+                caretLocation: caretLocation, selection: selection, wikiLinkIDProvider: wikiLinkIDProvider,
+                scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                configuration: configuration
+            )
+        }
         let astMs = Double(DispatchTime.now().uptimeNanoseconds - astT0) / 1_000_000
         // NSImage rendering reuses the existing, proven machinery.
         let imgT0 = DispatchTime.now().uptimeNanoseconds
-        result += styleBlockLatex(ctx)
-        result += styleInlineLatex(ctx)
-        result += styleImageEmbeds(ctx)
-        result += styleImageLinks(ctx)
+        result += PerfTrace.switchCount("style.latexBlockPass") { styleBlockLatex(ctx) }
+        result += PerfTrace.switchCount("style.latexInlinePass") { styleInlineLatex(ctx) }
+        result += PerfTrace.switchCount("style.imageEmbeds") { styleImageEmbeds(ctx) }
+        result += PerfTrace.switchCount("style.imageLinks") { styleImageLinks(ctx) }
         let imgMs = Double(DispatchTime.now().uptimeNanoseconds - imgT0) / 1_000_000
-        result += styleTables(ctx)
+        result += PerfTrace.switchCount("style.tables") { styleTables(ctx) }
         PerfTrace.note { "  styleAttributes: ast=\(String(format: "%.2f", astMs))ms latex+img4=\(String(format: "%.2f", imgMs))ms styledRanges=\(result.count)" }
         return result
     }

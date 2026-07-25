@@ -13,7 +13,13 @@
 import AppKit
 
 extension NativeTextViewCoordinator {
-    func updateCodeBlockSelection(textView: NSTextView, parsed: ParsedDocument? = nil) {
+    /// `reason` is diagnostics only: this is reached from five places (two text
+    /// delegates, the frame-change observer, the scroll-bounds observer, and the
+    /// async hop at the end of updateNSView) and the traces could not tell which
+    /// one was paying for the full-document layout below.
+    func updateCodeBlockSelection(textView: NSTextView, parsed: ParsedDocument? = nil, reason: String = "?") {
+        let tCodeSel = DispatchTime.now().uptimeNanoseconds
+        defer { PerfTrace.switchAdd("codeBlockSel(\(reason))", ms: PerfTrace.elapsedMs(since: tCodeSel)) }
         guard let textContainer = textView.textContainer else {
             onCodeBlockSelectionChange?([])
             return
@@ -56,8 +62,14 @@ extension NativeTextViewCoordinator {
         }
 
         // One-shot full-document layout per document; fixes stale Y from TextKit 2's lazy layout without per-update cost.
-        if !didEnsureLayoutForCurrentDocument, let tlm = textView.textLayoutManager {
-            tlm.ensureLayout(for: tlm.documentRange)
+        // Its gate is reset on every node switch (NativeTextViewWrapper), and this
+        // method is dispatched async — so on a switch this is a SECOND whole-document
+        // ensureLayout landing one runloop turn after updateNSView returned, i.e.
+        // outside every trace until now. `codeBlock.ensureLayout` measures it.
+        if !didEnsureLayoutForCurrentDocument, !isRebuildingDocument, let tlm = textView.textLayoutManager {
+            PerfTrace.switchCount("codeBlock.ensureLayout(\(reason))") {
+                tlm.ensureLayout(for: tlm.documentRange)
+            }
             didEnsureLayoutForCurrentDocument = true
         }
 

@@ -23,6 +23,16 @@ final class NativeTextView: NSTextView {
     var isApplyingManagedFrameSize = false
     /// Set on switch/resize to force full-layout height measurement until the cascade settles.
     var pendingFullLayoutMeasure = false
+    /// The last height measured against a COMPLETE layout, with the inputs it is
+    /// valid for. A document switch measures the height once inside `updateNSView`
+    /// (right after the rebuild's own full `ensureLayout`, so that measurement is
+    /// trustworthy), and AppKit then fits the frame in its deferred layout pass —
+    /// which measured it a second time. TextKit 2 evicts fragments when the frame
+    /// changes, so that second measurement was a COLD full-document pass:
+    /// 220 ms on a 346 KB note, for a number that had not changed.
+    /// Keyed on content length + container width, the two inputs that can change
+    /// the height; `pendingFullLayoutMeasure` still forces a real pass on a miss.
+    var lastFullMeasure: (length: Int, width: CGFloat, height: CGFloat)?
     /// Coalesces wide-table overlay updates to once per runloop (resize fires many per frame).
     var pendingWideTableOverlayUpdate = false
     var suppressAutoRevealOnce: Bool = false

@@ -55,6 +55,10 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     /// Extend rendering bounds for code-block backgrounds (full container width)
     /// and block images drawn below text via paragraphSpacing.
     override var renderingSurfaceBounds: CGRect {
+        PerfTrace.accumulate("fragBounds") { computeRenderingSurfaceBounds() }
+    }
+
+    private func computeRenderingSurfaceBounds() -> CGRect {
         var bounds = super.renderingSurfaceBounds
         // Task checkboxes too: the box draws left of the first glyph (marker
         // slot), outside the default text surface — TextKit would clip it.
@@ -75,6 +79,10 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     // MARK: - Drawing
 
     override func draw(at point: CGPoint, in context: CGContext) {
+        PerfTrace.accumulate("fragDraw") { drawContents(at: point, in: context) }
+    }
+
+    private func drawContents(at point: CGPoint, in context: CGContext) {
         // 1. Code-block backgrounds (behind text)
         drawCodeBlockBackground(at: point, in: context)
 
@@ -631,9 +639,11 @@ final class MarkdownLayoutManagerDelegate: NSObject, NSTextLayoutManagerDelegate
         textLayoutFragmentFor location: any NSTextLocation,
         in textElement: NSTextElement
     ) -> NSTextLayoutFragment {
-        PerfTrace.accumulate("fragProv") {
-            makeFragment(textLayoutManager: textLayoutManager, textElement: textElement)
-        }
+        // Bare tick, not `accumulate`: at 15,000+ calls per switch the helper's
+        // clock reads + linear label scan were a measurable share of the number
+        // they produced. Only the count matters here.
+        PerfTrace.fragProvTick()
+        return makeFragment(textLayoutManager: textLayoutManager, textElement: textElement)
     }
 
     private func makeFragment(

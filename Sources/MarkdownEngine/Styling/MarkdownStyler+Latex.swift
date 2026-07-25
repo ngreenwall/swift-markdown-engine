@@ -17,7 +17,7 @@ extension MarkdownStyler {
     static func styleBlockLatex(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
         for (idx, token) in ctx.scoped(ctx.blockLatexIndexed) {
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
+            if ctx.isInCode(token.range) { continue }
             let isActive = ctx.activeTokenIndices.contains(idx)
             let rawLatexContent = ctx.nsText.substring(with: token.contentRange)
             let latexContent = rawLatexContent.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,7 +31,9 @@ extension MarkdownStyler {
             if isActive {
                 appendSecondaryMarkers(for: token, to: &attrs, theme: ctx.configuration.theme)
             } else if !latexContent.isEmpty,
-                      let entry = ctx.services.latex.render(latex: latexContent, fontSize: latexFontSize, theme: ctx.configuration.theme) {
+                      let entry = PerfTrace.switchCount("latexBlock", {
+                          ctx.services.latex.render(latex: latexContent, fontSize: latexFontSize, theme: ctx.configuration.theme)
+                      }) {
                 _ = appendRenderedStandaloneBlock(
                     for: token,
                     rawContent: rawLatexContent,
@@ -75,18 +77,32 @@ extension MarkdownStyler {
         let blockquoteRanges = MarkdownStyler.StylingContext.indexed(ctx.tokens, .blockquote).map { $0.token.range }
         // Built once, not re-scanned per formula (latexFontSize was O(#latex × #tokens)).
         let headings = ctx.scoped(MarkdownStyler.StylingContext.indexed(ctx.tokens, .heading)).map { $0.token }
+        // Per-token guard costs, accumulated locally and reported once after the
+        // loop: each of these scans a whole array per formula, so on a
+        // formula-rich document they are candidates for the same quadratic blow-up
+        // that `latexFontSize` had. Measuring them individually is the only way to
+        // know which one is worth a binary search.
+        var msCodeGuard = 0.0, msTableGuard = 0.0, msSubstring = 0.0, msFontSize = 0.0
         for (idx, token) in scopedLatex {
-            if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
-            if tableRanges.contains(where: { tableRange in
-                token.range.location >= tableRange.location
-                    && NSMaxRange(token.range) <= NSMaxRange(tableRange)
-            }) { continue }
+            let tCode = DispatchTime.now().uptimeNanoseconds
+            let insideCode = ctx.isInCode(token.range)
+            msCodeGuard += PerfTrace.elapsedMs(since: tCode)
+            if insideCode { continue }
+
+            let tTable = DispatchTime.now().uptimeNanoseconds
+            let insideTable = MarkdownStyler.StylingContext.enclosingRange(token.range, in: tableRanges) != nil
+            msTableGuard += PerfTrace.elapsedMs(since: tTable)
+            if insideTable { continue }
 
             attrs.append((token.range, [NSAttributedString.Key.spellingState: 0]))
 
             let isActive = ctx.activeTokenIndices.contains(idx)
+            let tSub = DispatchTime.now().uptimeNanoseconds
             let latexContent = ctx.nsText.substring(with: token.contentRange)
+            msSubstring += PerfTrace.elapsedMs(since: tSub)
+            let tFont = DispatchTime.now().uptimeNanoseconds
             let latexFontSize = HeadingHelpers.latexFontSize(for: token, headings: headings, baseFont: ctx.baseFont)
+            msFontSize += PerfTrace.elapsedMs(since: tFont)
 
             if isActive {
                 for markerRange in token.markerRanges {
@@ -98,7 +114,10 @@ extension MarkdownStyler {
                     renderTheme.latexLightModeText = renderTheme.mutedText
                     renderTheme.latexDarkModeText = renderTheme.mutedText
                 }
-                if let entry = ctx.services.latex.render(latex: latexContent, fontSize: latexFontSize, theme: renderTheme) {
+                let inlineRender = PerfTrace.switchCount("latexInline") {
+                    ctx.services.latex.render(latex: latexContent, fontSize: latexFontSize, theme: renderTheme)
+                }
+                if let entry = inlineRender {
                     let imageBounds = CGRect(x: 0, y: entry.baselineOffset, width: entry.size.width, height: entry.size.height)
                     let contentLength = token.contentRange.length
                     let tinyDollarWidth = HeadingHelpers.textWidth("$", font: ctx.latexMarkerFont)
@@ -144,6 +163,10 @@ extension MarkdownStyler {
                 }
             }
         }
+        PerfTrace.switchAdd("inlineLatex.codeGuard", ms: msCodeGuard, count: scopedLatex.count)
+        PerfTrace.switchAdd("inlineLatex.tableGuard", ms: msTableGuard, count: scopedLatex.count)
+        PerfTrace.switchAdd("inlineLatex.substring", ms: msSubstring, count: scopedLatex.count)
+        PerfTrace.switchAdd("inlineLatex.fontSize", ms: msFontSize, count: scopedLatex.count)
         return attrs
     }
 }

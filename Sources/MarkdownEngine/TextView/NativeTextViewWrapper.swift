@@ -320,6 +320,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         scrollView.contentView.postsBoundsChangedNotifications = true
         var lastObservedViewportWidth = scrollView.contentView.bounds.width
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+          PerfTrace.switchMeasure("obs.frameChange") {
             // Refresh code-block overlays only on real viewport width changes, not on TextKit height-only echoes during typing.
             let newWidth = scrollView.contentView.bounds.width
             if abs(newWidth - lastObservedViewportWidth) > 0.5 {
@@ -331,8 +332,20 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 if textView.configuration.readingWidth != nil {
                     textView.centerReadingColumn(forClipWidth: newWidth)
                 }
-                context.coordinator.didEnsureLayoutForCurrentDocument = false
-                context.coordinator.updateCodeBlockSelection(textView: textView)
+                // Only invalidate the "document is laid out" flag when the text
+                // actually reflows. In reading-width mode the line width is pinned
+                // to `readingColumnWidth` and `centerReadingColumn` above changes
+                // only the container width and this view's origin.x — no reflow, so
+                // every laid-out fragment keeps its geometry.
+                //
+                // This fires on a node switch because the vertical scroller appears
+                // or disappears, which moves the clip width by a few points. The
+                // resulting full-document relayout was measured at 154 ms per switch
+                // into a 346 KB note — triggered by a scrollbar.
+                if textView.configuration.readingWidth == nil {
+                    context.coordinator.didEnsureLayoutForCurrentDocument = false
+                }
+                context.coordinator.updateCodeBlockSelection(textView: textView, reason: "frameChange")
             }
             // Only react with overscroll recalc when the viewport itself resizes
             // (window resize). Without this guard, TextKit-induced frame changes echo
@@ -354,17 +367,20 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 return
             }
             guard abs(container.frame.height - scrollView.contentView.bounds.height) > 1 else { return }
-            textView.recalcOverscroll(for: scrollView)
+            textView.recalcOverscroll(for: scrollView, probeTag: "obs.frameChange")
             scrollView.clampToInsets()
+          }
         }
         NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
+          PerfTrace.switchMeasure("obs.boundsChange") {
             textView.ensureVisibleLayout()
             if context.coordinator.isWritingToolsActive {
                 context.coordinator.fixWritingToolsChildWindowIfNeeded(textView: textView)
             }
             scrollView.clampToInsets()
             context.coordinator.refreshActiveLinkCaretRect()
-            context.coordinator.updateCodeBlockSelection(textView: textView)
+            context.coordinator.updateCodeBlockSelection(textView: textView, reason: "scrollBounds")
+          }
         }
         reconcileHeader(textView: textView, context: context)
         return scrollView
@@ -372,9 +388,32 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
 
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.nativeTextView else { return }
-        reconcileHeader(textView: textView, context: context)
-
         let isNodeSwitch = context.coordinator.documentId != documentId
+
+        // The switch frame now spans the WHOLE of updateNSView, not just the
+        // rebuild — the header reconcile and the retained-document bookkeeping
+        // above the rebuild were previously outside every trace. Passes that are
+        // NOT a switch stay silent unless they cost real time: that is how an
+        // extra SwiftUI update pass hiding inside one user-visible switch shows up.
+        let tUpdate = DispatchTime.now().uptimeNanoseconds
+        let tracingSwitch = isNodeSwitch || !context.coordinator.didInitialFormatting
+        if tracingSwitch { PerfTrace.switchBegin(docLength: (text as NSString).length) }
+        defer {
+            if tracingSwitch {
+                // `@updateEnd` marks where updateNSView returned; everything after
+                // it in the total is SwiftUI finishing its pass plus the first
+                // AppKit display cycle.
+                PerfTrace.switchCheckpoint("fragProv=\(PerfTrace.fragProvCount)")
+                PerfTrace.switchCheckpoint("updateEnd")
+                PerfTrace.switchEndAfterRunloop()
+            } else {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - tUpdate) / 1_000_000
+                if ms > 5 { PerfTrace.stamp("updateNSView(nonSwitch)", ms) }
+            }
+        }
+        PerfTrace.switchMeasure("header") {
+            reconcileHeader(textView: textView, context: context)
+        }
 
         // Drop remembered offsets for documents no longer retained (always keep
         // the current one). Only rebuilds the dict when something must go.
@@ -577,33 +616,62 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
 
         let font = NSFont(name: fontName, size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
-        textView.font = font
-        textView.baseFont = font
-        textView.recalcOverscroll(for: nsView)
-        (nsView as? ClampedScrollView)?.clampToInsets()
+        PerfTrace.switchMeasure("outFont") {
+            // Assign only on a real change. `NSTextView.font` writes the font
+            // attribute across the ENTIRE text storage and invalidates all layout
+            // — and at this point the storage still holds the OUTGOING document,
+            // which `rebuildTextStorageAndStyle` replaces wholesale a few lines
+            // below. Assigning unconditionally therefore makes the very next
+            // `recalcOverscroll` pay a COLD full-document layout for a document
+            // that is about to be discarded. Measured on a 346 KB note: 175–222 ms
+            // per switch away from it, 100 % of it wasted.
+            //
+            // Gated on `fontChanged`, NOT on `textView.font != font`: the getter
+            // returns nil as soon as the storage holds mixed fonts, which a styled
+            // Markdown document always does — so that comparison is true on every
+            // pass and guards nothing (measured: outFont=28ms, outOverscroll=248ms
+            // on a 346 KB note even with the comparison in place).
+            //
+            // Skipping it is safe because this assignment is redundant on every
+            // path that reaches here: `rebuildTextStorageAndStyle` below always
+            // runs, and it re-applies the font over the full range via
+            // `setAttributes(baseAttrs:)` and re-sets `typingAttributes`.
+            if fontChanged { textView.font = font }
+            textView.baseFont = font
+        }
+        PerfTrace.switchMeasure("outOverscroll") {
+            textView.recalcOverscroll(for: nsView)
+            (nsView as? ClampedScrollView)?.clampToInsets()
+        }
 
         // Sync coordinator's font fields BEFORE the rebuild so the helper
         // reads the current values from the View struct.
         context.coordinator.fontName = fontName
         context.coordinator.fontSize = fontSize
+        // No `switchMeasure` around this call: the rebuild reports its own
+        // phases from inside, and nesting would double-count them.
         context.coordinator.rebuildTextStorageAndStyle(
             textView,
             from: text,
             invalidateLayout: isNodeSwitch || rawSourceModeChanged
         )
-        textView.recalcOverscroll(for: nsView)
-        (nsView as? ClampedScrollView)?.clampToInsets()
+        PerfTrace.switchMeasure("overscroll") {
+            textView.recalcOverscroll(for: nsView)
+            (nsView as? ClampedScrollView)?.clampToInsets()
+        }
         // Height is measured now, so restore the saved offset; clampToInsets keeps
         // it in range if the document got shorter.
         if isNodeSwitch, let savedY = context.coordinator.scrollOffsets[documentId] {
-            nsView.contentView.scroll(to: NSPoint(x: nsView.contentView.bounds.origin.x, y: savedY))
-            nsView.reflectScrolledClipView(nsView.contentView)
-            (nsView as? ClampedScrollView)?.clampToInsets()
+            PerfTrace.switchMeasure("scrollRestore") {
+                nsView.contentView.scroll(to: NSPoint(x: nsView.contentView.bounds.origin.x, y: savedY))
+                nsView.reflectScrolledClipView(nsView.contentView)
+                (nsView as? ClampedScrollView)?.clampToInsets()
+            }
         }
         // Document rebuilds bypass textDidChange — re-derive emptiness here.
         textView.refreshPlaceholderVisibility()
         DispatchQueue.main.async {
-            context.coordinator.updateCodeBlockSelection(textView: textView)
+            context.coordinator.updateCodeBlockSelection(textView: textView, reason: "afterUpdate")
         }
 
         context.coordinator.onCaretRectChange = onCaretRectChange

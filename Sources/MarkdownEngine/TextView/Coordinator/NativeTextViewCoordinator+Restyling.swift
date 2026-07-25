@@ -19,6 +19,12 @@ extension NativeTextViewCoordinator {
         from text: String,
         invalidateLayout: Bool = false
     ) {
+        // Suppress the one-shot full-document layout for the duration: replacing
+        // the string fires the selection-change delegate mid-rebuild, and laying
+        // out unstyled text there is thrown away by the attribute pass below.
+        isRebuildingDocument = true
+        defer { isRebuildingDocument = false }
+
         // Storage is raw Markdown; only wiki links transform on display.
         // In raw source mode display IS storage — no transform, no metadata.
         let services = configuration.services
@@ -28,14 +34,33 @@ extension NativeTextViewCoordinator {
             displayText = text
             wikiLinkMetadata = [:]
         } else {
-            let displayState = WikiLinkService.makeDisplayState(from: text) { services.wikiLinks.name(forID: $0) }
+            let displayState = PerfTrace.switchMeasure("displayState") {
+                WikiLinkService.makeDisplayState(from: text) { services.wikiLinks.name(forID: $0) }
+            }
             displayText = displayState.display
             wikiLinkMetadata = displayState.metadata
         }
 
-        if textView.string != displayText {
-            textView.string = displayText
-            parseGeneration &+= 1
+        // Length first. Reading `textView.string` materializes the whole OUTGOING
+        // document and the `!=` then compares it character by character — measured
+        // at ~31 ms when leaving a 346 KB note, even when the incoming note is 548
+        // characters long. On a document swap the lengths virtually always differ,
+        // so the O(1) check short-circuits before either cost is paid. Equal
+        // lengths still take the exact comparison, which preserves the reason the
+        // guard exists: a font-only pass leaves the text untouched and must not
+        // rebuild the storage.
+        PerfTrace.switchMeasure("stringAssign") {
+            let incoming = displayText as NSString
+            // Split so the trace says which half costs: the comparison (reading the
+            // outgoing document) or the assignment (tearing its content elements
+            // down and building the incoming ones).
+            let changed = PerfTrace.switchCount("str.compare") {
+                textView.textStorage?.length != incoming.length || textView.string != displayText
+            }
+            if changed {
+                PerfTrace.switchCount("str.set") { textView.string = displayText }
+                parseGeneration &+= 1
+            }
         }
         lastSyncedText = text
         lastComputedStorage = text
@@ -47,7 +72,9 @@ extension NativeTextViewCoordinator {
         parseState.invalidate()
         pendingBacktickWindow = nil
         backtickCensusNeedsRescan = false
-        previousBacktickCount = MarkdownDetection.tripleBacktickCount(in: nsDisplay)
+        previousBacktickCount = PerfTrace.switchMeasure("backtickCensus") {
+            MarkdownDetection.tripleBacktickCount(in: nsDisplay)
+        }
         let fullRange = NSRange(location: 0, length: nsDisplay.length)
 
         let (baseFont, paragraph) = TextStylingService.makeBaseFontAndStyle(
@@ -62,14 +89,16 @@ extension NativeTextViewCoordinator {
             .paragraphStyle: paragraph
         ]
         textView.textStorage?.beginEditing()
-        textView.textStorage?.removeAttribute(.link, range: fullRange)
-        textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
+        PerfTrace.switchMeasure("baseAttrs") {
+            textView.textStorage?.removeAttribute(.link, range: fullRange)
+            textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
+        }
 
         if rawMode {
             // Base attributes only — the source stays verbatim and unstyled.
             activeTokenIndices = []
         } else {
-            let parsed = parsedDocument(for: displayText)
+            let parsed = PerfTrace.switchMeasure("parse") { parsedDocument(for: displayText) }
             let tokens = parsed.tokens
             // Hide caret from styling when read-only, else clicks reveal raw token syntax.
             let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
@@ -80,28 +109,49 @@ extension NativeTextViewCoordinator {
                 suppressed: !textView.isEditable
             )
 
-            let ranges = MarkdownStyler.styleAttributes(
-                text: displayText,
-                fontName: fontName,
-                fontSize: fontSize,
-                layoutBridge: layoutBridge,
-                caretLocation: caretLocation,
-                // Selection-revealed syntax (task checkboxes) needs the full
-                // range, not just the caret; read-only suppresses it like the caret.
-                selection: textView.isEditable ? textView.selectedRange() : nil,
-                activeTokenIndices: activeTokenIndices,
-                // FIX: apply .wikiLinkID attributes on load/node-switch too. Without this the uuid
-                // survived only in the range-keyed wikiLinkMetadata; once a later writeback shifted a
-                // link's range the metadata key missed and makeStorageState wrote [[Name]] (uuid lost).
-                // wikiLinkMetadata was just refreshed by makeDisplayState above, so ranges match here.
-                wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
-                precomputedTokens: tokens,
-                classified: parsed.classified,
-                configuration: configuration
-            )
-            for (range, attrs) in ranges {
-                for (key, value) in attrs {
-                    textView.textStorage?.addAttribute(key, value: value, range: range)
+            // `precomputedBlocks:` hands the styler the block parse we just did.
+            // Without it `DocumentAST.parse` takes its `?? BlockParser.parse(text)`
+            // branch and re-parses the entire document a second time on every load
+            // and every switch (MarkdownAST.swift). Same input, same registry, so
+            // the result is identical — this only removes the duplicate work.
+            //
+            // Still NOT passing `scopedRanges:` — that one is a behaviour change
+            // (the first pass would style only the viewport and the rest would have
+            // to be pulled in progressively), so it stays a separate decision.
+            // Whatever `style` reads below is what viewport scoping has to beat.
+            let ranges = PerfTrace.switchMeasure("style") {
+                MarkdownStyler.styleAttributes(
+                    text: displayText,
+                    fontName: fontName,
+                    fontSize: fontSize,
+                    layoutBridge: layoutBridge,
+                    caretLocation: caretLocation,
+                    // Selection-revealed syntax (task checkboxes) needs the full
+                    // range, not just the caret; read-only suppresses it like the caret.
+                    selection: textView.isEditable ? textView.selectedRange() : nil,
+                    activeTokenIndices: activeTokenIndices,
+                    // FIX: apply .wikiLinkID attributes on load/node-switch too. Without this the uuid
+                    // survived only in the range-keyed wikiLinkMetadata; once a later writeback shifted a
+                    // link's range the metadata key missed and makeStorageState wrote [[Name]] (uuid lost).
+                    // wikiLinkMetadata was just refreshed by makeDisplayState above, so ranges match here.
+                    wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
+                    precomputedTokens: tokens,
+                    classified: parsed.classified,
+                    precomputedBlocks: parsed.blocks,
+                    configuration: configuration
+                )
+            }
+            // Label carries the range count: this is one `addAttribute` into the
+            // live text storage per (range, key) pair, so the count is the input
+            // size for this phase.
+            PerfTrace.switchMeasure("applyAttrs(\(ranges.count))") {
+                // One `addAttributes` per range instead of one `addAttribute` per
+                // (range, key): identical result, but it collapses the ObjC message
+                // count by the average number of keys per range, and hoists the
+                // optional chain out of a loop that runs 60,000+ times.
+                guard let storage = textView.textStorage else { return }
+                for (range, attrs) in ranges {
+                    storage.addAttributes(attrs, range: range)
                 }
             }
         }
@@ -115,9 +165,25 @@ extension NativeTextViewCoordinator {
 
         if let tlm = textView.textLayoutManager {
             if invalidateLayout {
-                tlm.invalidateLayout(for: tlm.documentRange)
+                PerfTrace.switchMeasure("invalidateLayout") {
+                    tlm.invalidateLayout(for: tlm.documentRange)
+                }
             }
-            tlm.ensureLayout(for: tlm.documentRange)
+            // Forced full-document layout: this is what defeats TextKit 2's own
+            // viewport laziness, so it scales with paragraph count, not with what
+            // is on screen.
+            PerfTrace.switchMeasure("ensureLayout") {
+                tlm.ensureLayout(for: tlm.documentRange)
+            }
+            // This IS the "one-shot full-document layout per document" that
+            // `updateCodeBlockSelection` would otherwise do again, one runloop turn
+            // later, for the same document — measured at 152 ms on a 346 KB note,
+            // on top of the 250 ms just spent here. Claim it so the async pass
+            // skips it. (If code-block copy buttons ever sit at a wrong Y after a
+            // switch, this line is the first thing to revert.)
+            didEnsureLayoutForCurrentDocument = true
+            // New content — any cached height belongs to the previous document.
+            (textView as? NativeTextView)?.lastFullMeasure = nil
         }
 
         // Reconcile wide-table overlays after layout settles.

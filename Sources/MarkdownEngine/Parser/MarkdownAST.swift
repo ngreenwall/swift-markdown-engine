@@ -73,7 +73,11 @@ enum DocumentAST {
     static func parse(_ text: String, scopedRanges: [NSRange]? = nil, precomputedBlocks: [Block]? = nil,
                       registry: ExtensionRegistry = .empty) -> [BlockNode] {
         let ns = text as NSString
-        let blocks = precomputedBlocks ?? BlockParser.parse(text, registry: registry)
+        // `ast.blockParse` must read ~0 when the caller hands over the block parse
+        // it already did; anything else means `precomputedBlocks` is not arriving.
+        let blocks = PerfTrace.switchCount("ast.blockParse") {
+            precomputedBlocks ?? BlockParser.parse(text, registry: registry)
+        }
         // Scoped mode: skip building BlockNodes for blocks outside the edit.
         // Blocks tile the document in order, so one sweep over sorted candidate
         // ranges replaces scanning every candidate per block (which went
@@ -94,7 +98,11 @@ enum DocumentAST {
         } else {
             relevant = blocks
         }
-        return relevant.map { node(for: $0, ns: ns, scopedRanges: scopedRanges, registry: registry) }
+        // Building BlockNodes runs the INLINE parse for every block — this is the
+        // part of `DocumentAST.parse` that no caller-side cache can remove.
+        return PerfTrace.switchCount("ast.buildNodes") {
+            relevant.map { node(for: $0, ns: ns, scopedRanges: scopedRanges, registry: registry) }
+        }
     }
 
     private static func inScope(_ range: NSRange, _ scopedRanges: [NSRange]?) -> Bool {

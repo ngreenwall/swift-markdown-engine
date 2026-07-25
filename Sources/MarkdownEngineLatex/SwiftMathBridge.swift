@@ -127,7 +127,13 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         mathLabel.labelMode = .text
 
         // Latin Modern Math gives the cleanest LaTeX glyphs at typical sizes.
-        if let mathFont = MTFontManager().font(withName: "latinmodern-math", size: fontSize) {
+        // Use SwiftMath's own manager singleton, NOT a fresh `MTFontManager()`:
+        // the manager's `nameToFontMap` is what caches the parsed font, so a new
+        // instance per render starts with an empty map and re-parses the 733 KB
+        // OTF (plus its 65 KB plist) on every cache-missing formula. Measured on
+        // a document with 221 distinct block formulas: 0.63 ms × 221 = ~139 ms
+        // of pure font re-parsing, ~10 % of that document's whole open time.
+        if let mathFont = MTFontManager.manager.font(withName: "latinmodern-math", size: fontSize) {
             mathLabel.font = mathFont
         }
 
