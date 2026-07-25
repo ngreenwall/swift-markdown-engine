@@ -62,17 +62,18 @@ extension MarkdownStyler {
             // See renderTable: resolve table colors under the text view's real appearance.
             let renderAppearance = ctx.layoutBridge?.firstTextContainer?.textView?.effectiveAppearance
                 ?? NSApp.effectiveAppearance
+            let containerWidth = effectiveContainerWidth(for: ctx)
             let image = renderTable(
                 parsed,
                 baseFont: ctx.baseFont,
                 theme: ctx.configuration.theme,
                 codeBackgroundColor: ctx.codeBackgroundColor,
                 latex: ctx.services.latex,
-                appearance: renderAppearance
+                appearance: renderAppearance,
+                containerWidth: containerWidth
             )
             let imageBounds = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
             // Wide tables → scrollable mode (NSScrollView overlay); narrow → collapsed.
-            let containerWidth = effectiveContainerWidth(for: ctx)
             let isWide = image.size.width > containerWidth + 0.5
             let computedSourceID = stableTableSourceID(
                 for: source,
@@ -268,7 +269,8 @@ extension MarkdownStyler {
         theme: MarkdownEditorTheme,
         codeBackgroundColor: NSColor,
         latex: any LatexRenderer,
-        appearance: NSAppearance
+        appearance: NSAppearance,
+        containerWidth: CGFloat
     ) -> NSImage {
         let columnCount = table.alignments.count
         let cellHPadding: CGFloat = 12
@@ -302,12 +304,16 @@ extension MarkdownStyler {
             }
         }
 
-        var columnWidths = [CGFloat](repeating: minColumnContentWidth, count: columnCount)
-        var maxCellHeight: CGFloat = baseLineHeight
+        // Natural (single-line) widths and per-column minimums. The minimum
+        // is the widest whitespace-delimited token — a URL or long code span
+        // can't wrap, so shrinking a column below it would clip; instead the
+        // table stops shrinking there and the wide-table scroll overlay
+        // takes over.
+        var naturalWidths = [CGFloat](repeating: minColumnContentWidth, count: columnCount)
+        var minWidths = [CGFloat](repeating: minColumnContentWidth, count: columnCount)
         func considerCell(_ cell: NSAttributedString, col: Int) {
-            let size = cell.size()
-            columnWidths[col] = max(columnWidths[col], ceil(size.width))
-            maxCellHeight = max(maxCellHeight, ceil(size.height))
+            naturalWidths[col] = max(naturalWidths[col], ceil(cell.size().width))
+            minWidths[col] = max(minWidths[col], ceil(longestWordWidth(in: cell)))
         }
         for (i, cell) in headerCells.enumerated() where i < columnCount {
             considerCell(cell, col: i)
@@ -317,16 +323,63 @@ extension MarkdownStyler {
                 considerCell(cell, col: i)
             }
         }
+        for i in 0..<columnCount {
+            minWidths[i] = min(naturalWidths[i], max(minWidths[i], minColumnContentWidth))
+        }
 
-        let lineHeight = max(baseLineHeight, maxCellHeight)
         let rowCount = 1 + table.rows.count // header + body rows
-        let totalWidth = columnWidths.reduce(0, +)
-            + CGFloat(columnCount) * 2 * cellHPadding
+        let chromeWidth = CGFloat(columnCount) * 2 * cellHPadding
             + CGFloat(columnCount + 1) * borderWidth
-        let rowHeight = lineHeight + 2 * cellVPadding
-        let totalHeight = CGFloat(rowCount) * rowHeight + CGFloat(rowCount + 1) * borderWidth
+        let columnWidths = distributeColumnWidths(
+            natural: naturalWidths,
+            minimum: minWidths,
+            target: containerWidth - chromeWidth
+        )
+        let totalWidth = columnWidths.reduce(0, +) + chromeWidth
 
-        let size = NSSize(width: totalWidth, height: totalHeight)
+        // Attach the per-column paragraph style (alignment + word wrap) up
+        // front so measurement and drawing use the exact same attributed
+        // string — measuring a subtly different string under-counts a line
+        // and `draw(with:)` then silently drops it.
+        func alignedCell(_ s: NSAttributedString, col: Int) -> NSAttributedString {
+            let paragraph = NSMutableParagraphStyle()
+            switch table.alignments[col] {
+            case .left:   paragraph.alignment = .left
+            case .center: paragraph.alignment = .center
+            case .right:  paragraph.alignment = .right
+            }
+            paragraph.lineBreakMode = .byWordWrapping
+            let aligned = NSMutableAttributedString(attributedString: s)
+            aligned.addAttribute(
+                .paragraphStyle,
+                value: paragraph,
+                range: NSRange(location: 0, length: aligned.length)
+            )
+            return aligned
+        }
+        let alignedHeaderCells = headerCells.enumerated().map { alignedCell($0.element, col: min($0.offset, columnCount - 1)) }
+        let alignedBodyCells = bodyCells.map { row in
+            row.enumerated().map { alignedCell($0.element, col: min($0.offset, columnCount - 1)) }
+        }
+
+        // Row heights follow the wrapped cell text at the final column widths.
+        func measuredCellHeight(_ cell: NSAttributedString, col: Int) -> CGFloat {
+            let bounds = cell.boundingRect(
+                with: NSSize(width: columnWidths[col], height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin]
+            )
+            return ceil(bounds.height)
+        }
+        var rowContentHeights = [CGFloat](repeating: baseLineHeight, count: rowCount)
+        for (i, cell) in alignedHeaderCells.enumerated() where i < columnCount {
+            rowContentHeights[0] = max(rowContentHeights[0], measuredCellHeight(cell, col: i))
+        }
+        for (rowIdx, row) in alignedBodyCells.enumerated() {
+            for (i, cell) in row.enumerated() where i < columnCount {
+                rowContentHeights[rowIdx + 1] = max(rowContentHeights[rowIdx + 1], measuredCellHeight(cell, col: i))
+            }
+        }
+        let rowHeights = rowContentHeights.map { $0 + 2 * cellVPadding }
 
         // Pre-compute layout offsets (top-down coords; drawing runs flipped).
         var columnLeft = [CGFloat](repeating: 0, count: columnCount + 1)
@@ -337,10 +390,12 @@ extension MarkdownStyler {
         var rowTop = [CGFloat](repeating: 0, count: rowCount + 1)
         rowTop[0] = borderWidth
         for i in 0..<rowCount {
-            rowTop[i + 1] = rowTop[i] + rowHeight + borderWidth
+            rowTop[i + 1] = rowTop[i] + rowHeights[i] + borderWidth
         }
+        let totalHeight = rowTop[rowCount]
 
-        let alignments = table.alignments
+        let size = NSSize(width: totalWidth, height: totalHeight)
+
         let headerFill = mutedColor(alpha: 0.08)
 
         // Flipped image so AppKit handles the y-flip; a manual transform mirror would flip glyphs too.
@@ -351,7 +406,7 @@ extension MarkdownStyler {
                 x: borderWidth,
                 y: borderWidth,
                 width: size.width - 2 * borderWidth,
-                height: rowHeight
+                height: rowHeights[0]
             )).fill()
 
             // Outer border
@@ -380,45 +435,112 @@ extension MarkdownStyler {
             }
             separators.stroke()
 
-            func drawCell(_ s: NSAttributedString, col: Int, row: Int) {
+            func drawCell(_ aligned: NSAttributedString, col: Int, row: Int) {
                 guard col < columnCount else { return }
                 let cellLeft = columnLeft[col] + cellHPadding
-                let cellRight = columnLeft[col + 1] - borderWidth - cellHPadding
-                let availableWidth = cellRight - cellLeft
-                // Align via NSParagraphStyle in the content rect so the text engine handles clipping.
-                let paragraph = NSMutableParagraphStyle()
-                switch alignments[col] {
-                case .left:   paragraph.alignment = .left
-                case .center: paragraph.alignment = .center
-                case .right:  paragraph.alignment = .right
-                }
-                paragraph.lineBreakMode = .byClipping
-                let aligned = NSMutableAttributedString(attributedString: s)
-                aligned.addAttribute(
-                    .paragraphStyle,
-                    value: paragraph,
-                    range: NSRange(location: 0, length: aligned.length)
-                )
-                let cellInnerTop = rowTop[row] + max(0, (rowHeight - lineHeight) / 2)
+                // Top-aligned: wrapped cells of different heights share a
+                // row. The rect gets half a line of bottom slack because
+                // `draw(with:)` drops any line that doesn't FULLY fit — a
+                // sub-point metric difference vs measurement would silently
+                // eat the last line. The text never uses the slack (its
+                // wrapped height is what measurement said), so nothing can
+                // spill into the border.
                 let drawRect = NSRect(
                     x: cellLeft,
-                    y: cellInnerTop,
-                    width: availableWidth,
-                    height: lineHeight
+                    y: rowTop[row] + cellVPadding,
+                    width: columnWidths[col],
+                    height: rowHeights[row] - 2 * cellVPadding + baseLineHeight / 2
                 )
                 aligned.draw(with: drawRect, options: [.usesLineFragmentOrigin], context: nil)
             }
 
-            for (col, cell) in headerCells.enumerated() {
+            for (col, cell) in alignedHeaderCells.enumerated() {
                 drawCell(cell, col: col, row: 0)
             }
-            for (rowIdx, row) in bodyCells.enumerated() {
+            for (rowIdx, row) in alignedBodyCells.enumerated() {
                 for (col, cell) in row.enumerated() {
                     drawCell(cell, col: col, row: rowIdx + 1)
                 }
             }
             return true
         }
+    }
+
+    // MARK: - Responsive column sizing
+
+    /// Fit columns into `target` content width. Columns already at or under
+    /// their proportional share keep their natural width; oversize columns
+    /// split what remains proportionally, never dropping below their
+    /// minimum. When even the minimums overflow, the minimums win and the
+    /// caller's wide-table path scrolls.
+    static func distributeColumnWidths(
+        natural: [CGFloat],
+        minimum: [CGFloat],
+        target: CGFloat
+    ) -> [CGFloat] {
+        guard !natural.isEmpty else { return natural }
+        if natural.reduce(0, +) <= target { return natural }
+        if minimum.reduce(0, +) >= target { return minimum }
+
+        var result = natural
+        var frozen = [Bool](repeating: false, count: natural.count)
+        // Each pass freezes at least one column at its clamp; converges
+        // within columnCount passes.
+        for _ in natural.indices {
+            let frozenSum = natural.indices.filter { frozen[$0] }.map { result[$0] }.reduce(0, +)
+            let flexIndices = natural.indices.filter { !frozen[$0] }
+            let flexNaturalSum = flexIndices.map { natural[$0] }.reduce(0, +)
+            guard flexNaturalSum > 0 else { break }
+            let available = target - frozenSum
+            var clampedAny = false
+            for i in flexIndices {
+                let proportional = natural[i] * available / flexNaturalSum
+                if proportional <= minimum[i] {
+                    result[i] = minimum[i]
+                    frozen[i] = true
+                    clampedAny = true
+                } else if proportional >= natural[i] {
+                    result[i] = natural[i]
+                    frozen[i] = true
+                    clampedAny = true
+                } else {
+                    result[i] = floor(proportional)
+                }
+            }
+            if !clampedAny { break }
+        }
+        return result
+    }
+
+    /// Widest whitespace-delimited token in the cell — the narrowest width
+    /// the column can wrap down to without clipping. Splitting on
+    /// whitespace (not linguistic word boundaries) keeps URLs and code
+    /// spans intact as single unbreakable tokens.
+    static func longestWordWidth(in cell: NSAttributedString) -> CGFloat {
+        let ns = cell.string as NSString
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        var widest: CGFloat = 0
+        var wordStart: Int?
+        for i in 0...ns.length {
+            let isBoundary: Bool
+            if i == ns.length {
+                isBoundary = true
+            } else if let scalar = UnicodeScalar(ns.character(at: i)) {
+                isBoundary = whitespace.contains(scalar)
+            } else {
+                isBoundary = false   // surrogate half — part of a word
+            }
+            if isBoundary {
+                if let start = wordStart {
+                    let word = cell.attributedSubstring(from: NSRange(location: start, length: i - start))
+                    widest = max(widest, word.size().width)
+                    wordStart = nil
+                }
+            } else if wordStart == nil {
+                wordStart = i
+            }
+        }
+        return widest
     }
 
     // MARK: - Scrollable table helpers

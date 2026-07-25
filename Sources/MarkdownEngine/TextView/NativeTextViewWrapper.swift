@@ -313,6 +313,34 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
         scrollView.contentView.postsBoundsChangedNotifications = true
         var lastObservedViewportWidth = scrollView.contentView.bounds.width
+        // Tables raster at the container width available when styled, so a
+        // width change needs a restyle to re-wrap their cells. Restyling
+        // during a live resize destabilizes the TextKit2 layout cache
+        // (glyph corruption), so the restyle is debounced until the width
+        // has been stable for a beat — and re-armed if the drag is still in
+        // progress when the debounce fires.
+        var lastTableRestyleWidth = scrollView.contentView.bounds.width
+        var tableRestyleWorkItem: DispatchWorkItem?
+        func scheduleTableRestyleAfterResize() {
+            tableRestyleWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak textView, weak scrollView] in
+                guard let textView, let scrollView else { return }
+                if textView.inLiveResize {
+                    scheduleTableRestyleAfterResize()
+                    return
+                }
+                let currentWidth = scrollView.contentView.bounds.width
+                guard abs(currentWidth - lastTableRestyleWidth) > 4 else { return }
+                lastTableRestyleWidth = currentWidth
+                // Cheap gate: no pipe character → no table → nothing to re-wrap.
+                guard textView.string.contains("|") else { return }
+                let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+                guard fullRange.length > 0 else { return }
+                context.coordinator.restyleParagraphs([fullRange], in: textView)
+            }
+            tableRestyleWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        }
         NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView.contentView, queue: nil) { _ in
             // Refresh code-block overlays only on real viewport width changes, not on TextKit height-only echoes during typing.
             let newWidth = scrollView.contentView.bounds.width
@@ -327,6 +355,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 }
                 context.coordinator.didEnsureLayoutForCurrentDocument = false
                 context.coordinator.updateCodeBlockSelection(textView: textView)
+                if abs(newWidth - lastTableRestyleWidth) > 4 {
+                    scheduleTableRestyleAfterResize()
+                }
             }
             // Only react with overscroll recalc when the viewport itself resizes
             // (window resize). Without this guard, TextKit-induced frame changes echo
