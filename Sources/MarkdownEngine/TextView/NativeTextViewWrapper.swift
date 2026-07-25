@@ -399,22 +399,24 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         let tUpdate = DispatchTime.now().uptimeNanoseconds
         let tracingSwitch = isNodeSwitch || !context.coordinator.didInitialFormatting
         if tracingSwitch { PerfTrace.switchBegin(docLength: (text as NSString).length) }
-        // TEMP (empty-document-on-swipe): the invariant every pass must leave
-        // true is "what the view shows equals what the app handed in". Checked
-        // unconditionally, printed only when it fails, so a rapid swipe that
-        // blanks a document names itself instead of needing a repro.
+        // A non-empty document must never leave a pass with a dead stack. Not a
+        // text comparison — `text` is storage form and the view holds display
+        // form, so their lengths differ legitimately by the stripped `|UUID`s.
+        // What cannot be legitimate is a nil content manager: that is the stack
+        // having been deallocated out from under the view, which reads as an
+        // EMPTY document (see `liveContentStorage`).
 #if DEBUG
         defer {
-            let expected = (text as NSString).length
-            let shown = (textView.string as NSString).length
-            if expected != shown {
-                let storage = textView.textStorage?.length ?? -1
-                let synced = (context.coordinator.lastSyncedText as NSString).length
-                print("‼️ DOC MISMATCH id=\(documentId) handedIn=\(expected) shown=\(shown)"
-                      + " storage=\(storage) lastSynced=\(synced)"
-                      + " switch=\(isNodeSwitch ? 1 : 0) didFormat=\(context.coordinator.didInitialFormatting ? 1 : 0)"
-                      + " rebuilding=\(context.coordinator.isRebuildingDocument ? 1 : 0)"
+            let dead = !text.isEmpty
+                && (textView.textStorage == nil
+                    || textView.textLayoutManager?.textContentManager == nil
+                    || textView.string.isEmpty)
+            if dead {
+                print("‼️ DEAD STACK id=\(documentId) handedIn=\((text as NSString).length)"
+                      + " shown=\((textView.string as NSString).length)"
+                      + " storage=\(textView.textStorage?.length ?? -1)"
                       + " contentMgr=\(textView.textLayoutManager?.textContentManager != nil ? 1 : 0)"
+                      + " switch=\(isNodeSwitch ? 1 : 0)"
                       + " pool=[\(context.coordinator.warmDocuments.traceSummary)]")
             }
         }
@@ -663,8 +665,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 // Not warm: give the incoming document its own stack, so the one
                 // just captured keeps its layout instead of being written over.
                 if configuration.warmDocuments.isEnabled {
-                    let (_, _, container) = context.coordinator.makeTextKitStack()
+                    let (storage, _, container) = context.coordinator.makeTextKitStack()
                     container.textView = textView
+                    context.coordinator.liveContentStorage = storage
                 }
                 context.coordinator.session = DocumentSession()
                 context.coordinator.didInitialFormatting = false

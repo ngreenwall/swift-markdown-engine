@@ -90,6 +90,17 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// rebuild, which is how people actually move between notes.
     let warmDocuments = WarmDocumentPool()
 
+    /// Strong reference to the LIVE document's content storage.
+    ///
+    /// Ownership in TextKit 2 runs content storage → layout manager → container,
+    /// and every back-reference is weak (`NSTextLayoutManager.textContentManager`,
+    /// `NSTextContainer.textLayoutManager`). `WarmDocumentPool.take` hands the
+    /// stack out and stops holding it, so without this the only remaining strong
+    /// reference is a local in `updateNSView` — and the storage dies when that
+    /// returns. Observed in-app as `textStorage=nil, textContentManager=nil` and
+    /// an EMPTY document right after a warm swap.
+    var liveContentStorage: NSTextContentStorage?
+
 
     /// The document's own state, swappable as one unit — see DocumentSession.
     /// A TextKit-stack swap assigns this and nothing else, which is what makes

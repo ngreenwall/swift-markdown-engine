@@ -192,6 +192,8 @@ extension NativeTextViewCoordinator {
 
     /// A fresh stack configured exactly like `makeNSView`'s, so a document that
     /// is not warm gets its own instead of reusing the outgoing document's.
+    ///
+    /// The caller must retain the content storage — see `liveContentStorage`.
 
     func makeTextKitStack() -> (NSTextContentStorage, NSTextLayoutManager, NSTextContainer) {
         let contentStorage = NSTextContentStorage()
@@ -252,6 +254,10 @@ extension NativeTextViewCoordinator {
         // runs behind `isRebuildingDocument` so anything re-entrant bails out
         // rather than acting on a half-swapped view.
         session = warm.session
+        // Take ownership of the stack: the pool released it in `take`, and the
+        // caller's local is the only other strong reference. See
+        // `liveContentStorage`.
+        liveContentStorage = warm.contentStorage
         textView.baseContentHeight = warm.baseContentHeight
         textView.activeBottomOverscroll = warm.activeBottomOverscroll
         textView.lastFullMeasure = warm.lastFullMeasure
