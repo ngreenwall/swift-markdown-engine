@@ -85,7 +85,20 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// `ensureLayout` at the end then redoes it from cold. The rebuild always
     /// finishes with a full layout, so anything forced before that is waste.
     var isRebuildingDocument: Bool = false
-    var lastSyncedText: String
+    /// The one document kept laid out across a switch (see WarmDocument).
+    /// Exactly one, because retained layout costs tens of megabytes per large
+    /// document; a pool sized by bytes is the next step, not this one.
+    var warmDocument: WarmDocument?
+
+    /// The document's own state, swappable as one unit — see DocumentSession.
+    /// A TextKit-stack swap assigns this and nothing else, which is what makes
+    /// it impossible to restore a document's text without its splice base.
+    var session = DocumentSession()
+
+    var lastSyncedText: String {
+        get { session.lastSyncedText }
+        set { session.lastSyncedText = newValue }
+    }
     var isProgrammaticEdit: Bool = false
     var isWritingToolsActive: Bool = false
     var wtStartDocumentId: String?
@@ -98,40 +111,70 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var wtUndoneDuringSession: Bool = false
     var wtPostUndoSnapshot: String?
     var lastAppliedInlineReplacementID: UUID?
-    var activeTokenIndices: Set<Int> = []
-    var previousActiveTokenIndices: Set<Int> = []
-    var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
-    var previousBacktickCount: Int = 0
+    var activeTokenIndices: Set<Int> {
+        get { session.activeTokenIndices }
+        set { session.activeTokenIndices = newValue }
+    }
+    var previousActiveTokenIndices: Set<Int> {
+        get { session.previousActiveTokenIndices }
+        set { session.previousActiveTokenIndices = newValue }
+    }
+    var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] {
+        get { session.wikiLinkMetadata }
+        set { session.wikiLinkMetadata = newValue }
+    }
+    var previousBacktickCount: Int {
+        get { session.previousBacktickCount }
+        set { session.previousBacktickCount = newValue }
+    }
     /// Backtick census baseline captured in shouldChangeTextIn: the pre-edit
     /// window count around the proposed edit, so textDidChange can update the
     /// census from the edited window alone instead of rescanning the document.
-    var pendingBacktickWindow: (location: Int, oldLength: Int, oldCount: Int)?
+    var pendingBacktickWindow: (location: Int, oldLength: Int, oldCount: Int)? {
+        get { session.pendingBacktickWindow }
+        set { session.pendingBacktickWindow = newValue }
+    }
     /// Whether the PRE-edit text around the pending edit touched a registered
     /// extension block fence — captured in shouldChangeTextIn so a DELETED
     /// fence still forces the full restyle in textDidChange.
     var pendingExtFenceTouched = false
     /// Set when the storage mutated without the census bookkeeping seeing it
     /// (IME composition) — forces the next census back to a full scan.
-    var backtickCensusNeedsRescan = false
+    var backtickCensusNeedsRescan: Bool {
+        get { session.backtickCensusNeedsRescan }
+        set { session.backtickCensusNeedsRescan = newValue }
+    }
     /// DEBUG-only sampling counter for verifying the incremental census.
     var backtickVerifyCounter: UInt = 0
     /// Incremental parse state for this editor (buffer + blocks + tokens
     /// evolve together under the edit descriptor).
-    let parseState = DocumentParseState()
+    var parseState: DocumentParseState { session.parseState }
     /// Monotonic stamp for fresh ParsedDocument builds (see ParsedDocument.version).
-    var parsedDocumentVersion: UInt64 = 0
+    var parsedDocumentVersion: UInt64 {
+        get { session.parsedDocumentVersion }
+        set { session.parsedDocumentVersion = newValue }
+    }
     /// Single-slot memo for computeActiveTokenIndices — it runs up to three
     /// times per keystroke on identical inputs (pre-edit ask, selection
     /// change, textDidChange). Pure function of (version, selection, suppressed).
-    var activeTokenMemo: (version: UInt64, selection: NSRange, suppressed: Bool, result: Set<Int>)?
+    var activeTokenMemo: (version: UInt64, selection: NSRange, suppressed: Bool, result: Set<Int>)? {
+        get { session.activeTokenMemo }
+        set { session.activeTokenMemo = newValue }
+    }
 
     /// Display-text length after the previous textDidChange — yields the edit's
     /// length delta without retaining the previous text.
-    var previousDisplayLength: Int = -1
+    var previousDisplayLength: Int {
+        get { session.previousDisplayLength }
+        set { session.previousDisplayLength = newValue }
+    }
     /// Storage form computed by the previous wiki sync, kept synchronously
     /// (unlike `lastSyncedText`, which updates via async dispatch and can lag a
     /// keystroke). This is the splice base for the incremental path.
-    var lastComputedStorage: String = ""
+    var lastComputedStorage: String {
+        get { session.lastComputedStorage }
+        set { session.lastComputedStorage = newValue }
+    }
     /// DEBUG-only sampling counter for verifying splices against full rebuilds.
     var wikiVerifyCounter: UInt = 0
 
@@ -154,20 +197,41 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// Drag-select suppressed a restyle; replayed on the next non-drag selection change.
     var needsRestyleAfterDrag = false
 
-    var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
+    var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] {
+        get { session.cachedCodeBlockTokens }
+        set { session.cachedCodeBlockTokens = newValue }
+    }
     /// Dedupe key of the last emitted code-block selections — identical
     /// (parse version, scroll, width, active-code set) means identical output,
     /// so the second per-keystroke invocation can skip the geometry work.
-    var lastCodeSelKey: (UInt64, CGFloat, CGFloat, Set<Int>)?
-    var cachedParsedText: String?
-    var cachedParsedDocument: ParsedDocument?
+    var lastCodeSelKey: (UInt64, CGFloat, CGFloat, Set<Int>)? {
+        get { session.lastCodeSelKey }
+        set { session.lastCodeSelKey = newValue }
+    }
+    var cachedParsedText: String? {
+        get { session.cachedParsedText }
+        set { session.cachedParsedText = newValue }
+    }
+    var cachedParsedDocument: ParsedDocument? {
+        get { session.cachedParsedDocument }
+        set { session.cachedParsedDocument = newValue }
+    }
     /// Monotonic edit counter: bumped whenever the text storage can have
     /// changed. Lets `parsedDocument` return cache hits in O(1) instead of an
     /// O(doc) string compare. Any code that mutates the storage directly
     /// (bypassing shouldChangeText/textDidChange) must bump this.
-    var parseGeneration: UInt64 = 0
-    var cachedParseGeneration: UInt64 = .max
-    var cachedParsedLength: Int = -1
+    var parseGeneration: UInt64 {
+        get { session.parseGeneration }
+        set { session.parseGeneration = newValue }
+    }
+    var cachedParseGeneration: UInt64 {
+        get { session.cachedParseGeneration }
+        set { session.cachedParseGeneration = newValue }
+    }
+    var cachedParsedLength: Int {
+        get { session.cachedParsedLength }
+        set { session.cachedParsedLength = newValue }
+    }
     // Skip spellcheck property setters when the state wouldn't change.
     var cachedSpellingDisabled: Bool?
 
@@ -270,8 +334,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         self.onLinkClick = onLinkClick
         self.onCaretRectChange = nil
         self.onInlineSelectionChange = onInlineSelectionChange
-        self.lastSyncedText = text.wrappedValue
         super.init()
+        // Forwards into `session` now, which is a property access and therefore
+        // only available after super.init.
+        self.lastSyncedText = text.wrappedValue
         // Init + didSet share this helper so the observer tracks whichever service is current.
         subscribeToAppearanceNotification()
     }

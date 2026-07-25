@@ -145,13 +145,18 @@ extension NativeTextViewCoordinator {
             // live text storage per (range, key) pair, so the count is the input
             // size for this phase.
             PerfTrace.switchMeasure("applyAttrs(\(ranges.count))") {
-                // One `addAttributes` per range instead of one `addAttribute` per
-                // (range, key): identical result, but it collapses the ObjC message
-                // count by the average number of keys per range, and hoists the
-                // optional chain out of a loop that runs 60,000+ times.
+                // Per (range, key), NOT `addAttributes(_:range:)`. The plural form
+                // looks like the obvious win — one message instead of N — but it
+                // takes a Swift Dictionary and bridges it to NSDictionary on every
+                // call. With 60,436 ranges holding one or two keys each, that
+                // bridging cost more than the messages it saved: measured 73 ms →
+                // 123 ms on a 346 KB document. Hoisting the optional chain out of
+                // the loop is kept; that part was free.
                 guard let storage = textView.textStorage else { return }
                 for (range, attrs) in ranges {
-                    storage.addAttributes(attrs, range: range)
+                    for (key, value) in attrs {
+                        storage.addAttribute(key, value: value, range: range)
+                    }
                 }
             }
         }

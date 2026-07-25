@@ -16,14 +16,28 @@ func layoutBridgeDefaultLineHeight(for font: NSFont, using bridge: LayoutBridge?
 }
 
 final class LayoutBridge {
-    private let textLayoutManager: NSTextLayoutManager
+    /// Resolved from the text view on every access rather than captured once.
+    ///
+    /// `NSTextView.textLayoutManager` is derived from its text container, so
+    /// repointing the container at a different TextKit 2 stack — which is how a
+    /// document can be kept laid out per tab and swapped back in — silently
+    /// leaves any CAPTURED layout manager pointing at the previous document.
+    /// Every other layout-manager reference in the engine already goes through
+    /// `textView.textLayoutManager`; this was the only place that did not.
+    ///
+    /// Weak, and the text view holds the bridge weakly too — the coordinator owns it.
+    private weak var textView: NSTextView?
 
-    init(_ textLayoutManager: NSTextLayoutManager) {
-        self.textLayoutManager = textLayoutManager
+    init(textView: NSTextView) {
+        self.textView = textView
+    }
+
+    private var textLayoutManager: NSTextLayoutManager? {
+        textView?.textLayoutManager
     }
 
     private var textContentStorage: NSTextContentStorage? {
-        textLayoutManager.textContentManager as? NSTextContentStorage
+        textLayoutManager?.textContentManager as? NSTextContentStorage
     }
 
     private func textRange(for range: NSRange) -> NSTextRange? {
@@ -38,7 +52,7 @@ final class LayoutBridge {
     }
 
     func boundingRect(forCharacterRange range: NSRange, in textContainer: NSTextContainer) -> CGRect {
-        guard let textRange = textRange(for: range) else { return .zero }
+        guard let textLayoutManager, let textRange = textRange(for: range) else { return .zero }
         var result = CGRect.null
         textLayoutManager.enumerateTextSegments(
             in: textRange, type: .standard, options: []
@@ -54,7 +68,7 @@ final class LayoutBridge {
         in textContainer: NSTextContainer,
         fractionOfDistanceBetweenInsertionPoints fraction: inout CGFloat
     ) -> Int {
-        guard let tcs = textContentStorage else {
+        guard let textLayoutManager, let tcs = textContentStorage else {
             fraction = 0
             return NSNotFound
         }
@@ -89,16 +103,16 @@ final class LayoutBridge {
 
     func invalidateDisplay(forCharacterRange range: NSRange) {
         // In TextKit 2, invalidating layout also triggers redisplay.
-        guard textRange(for: range) != nil else { return }
+        guard let textLayoutManager, textRange(for: range) != nil else { return }
         textLayoutManager.textViewportLayoutController.layoutViewport()
     }
 
     func removeTemporaryAttribute(_ attrName: NSAttributedString.Key, forCharacterRange range: NSRange) {
-        guard let textRange = textRange(for: range) else { return }
+        guard let textLayoutManager, let textRange = textRange(for: range) else { return }
         textLayoutManager.removeRenderingAttribute(attrName, for: textRange)
     }
 
     var firstTextContainer: NSTextContainer? {
-        textLayoutManager.textContainer
+        textLayoutManager?.textContainer
     }
 }

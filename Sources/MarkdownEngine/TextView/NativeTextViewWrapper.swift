@@ -274,8 +274,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         if #available(macOS 15.1, *) {
             textView.writingToolsBehavior = .complete
         }
-        // Create TextKit 2 layout bridge
-        let bridge = LayoutBridge(textLayoutManager)
+        // Create TextKit 2 layout bridge. It resolves the layout manager from the
+        // text view, so it survives a TextKit-stack swap (see LayoutBridge).
+        let bridge = LayoutBridge(textView: textView)
         context.coordinator.layoutBridge = bridge
         textView.layoutBridge = bridge
 
@@ -580,6 +581,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         if fontChanged {
             context.coordinator.didInitialFormatting = false
         }
+        var warmSwapSucceeded = false
         if isNodeSwitch {
             // Save the outgoing document's scroll position — unless it just left
             // the retained set, in which case let it reset to top next time.
@@ -599,12 +601,53 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // no longer clear undo here — that `removeAllActions()` is what killed Cmd+Z
             // across a file switch.
             textView.breakUndoCoalescing()
+
+            // Warm switch: look the INCOMING document up before the outgoing one
+            // overwrites the single warm slot, then hand the view back its own
+            // already-laid-out stack. Skipped entirely unless MD_WARM_SWITCH=1.
+            var incomingWarm: WarmDocument?
+            if WarmDocument.isEnabled {
+                if let warm = context.coordinator.warmDocument, warm.documentId == documentId {
+                    incomingWarm = warm
+                } else {
+                    PerfTrace.stamp("warmSwap.miss", 0,
+                                    "want=\(documentId) have=\(context.coordinator.warmDocument?.documentId ?? "none")")
+                }
+                // The outgoing stack becomes the warm one — but only after its
+                // session is still the live one, i.e. before the swap below.
+                if let outgoingId = context.coordinator.documentId {
+                    context.coordinator.warmDocument = context.coordinator.captureWarmDocument(
+                        textView,
+                        documentId: outgoingId,
+                        storageText: context.coordinator.lastSyncedText
+                    )
+                } else {
+                    context.coordinator.warmDocument = nil
+                }
+            }
+
             context.coordinator.documentId = documentId
             // Drop the incoming document's undo stack if its text changed while
             // switched away — its recorded ranges are now stale.
             context.coordinator.invalidateUndoIfContentDiverged(for: documentId, incomingText: text)
-            context.coordinator.didInitialFormatting = false
-            context.coordinator.didEnsureLayoutForCurrentDocument = false
+            if let incomingWarm,
+               context.coordinator.restoreWarmDocument(incomingWarm, into: textView, expecting: text) {
+                // The stack that came back is already styled and laid out, so the
+                // rebuild below is skipped and these two flags stay TRUE.
+                warmSwapSucceeded = true
+            } else {
+                // Not warm: give the incoming document its own stack, so the one
+                // just captured keeps its layout instead of being written over.
+                if WarmDocument.isEnabled {
+                    let (storage, layoutManager, container) = context.coordinator.makeTextKitStack()
+                    _ = storage
+                    _ = layoutManager
+                    container.textView = textView
+                }
+                context.coordinator.session = DocumentSession()
+                context.coordinator.didInitialFormatting = false
+                context.coordinator.didEnsureLayoutForCurrentDocument = false
+            }
             context.coordinator.resetImageEmbedState()
             // Drop old document's wide-table overlays synchronously.
             textView.removeAllWideTableOverlays()
@@ -650,11 +693,20 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.fontSize = fontSize
         // No `switchMeasure` around this call: the rebuild reports its own
         // phases from inside, and nesting would double-count them.
-        context.coordinator.rebuildTextStorageAndStyle(
-            textView,
-            from: text,
-            invalidateLayout: isNodeSwitch || rawSourceModeChanged
-        )
+        if warmSwapSucceeded {
+            // Nothing to rebuild: parse, styling and layout all came back with the
+            // stack. Keep `lastSyncedText` in step so the writeback splice base and
+            // the text the view actually holds cannot drift apart.
+            context.coordinator.lastSyncedText = text
+            PerfTrace.switchCount("warmSwap") {}
+            PerfTrace.stamp("warmSwap.hit", 0, "id=\(documentId)")
+        } else {
+            context.coordinator.rebuildTextStorageAndStyle(
+                textView,
+                from: text,
+                invalidateLayout: isNodeSwitch || rawSourceModeChanged
+            )
+        }
         PerfTrace.switchMeasure("overscroll") {
             textView.recalcOverscroll(for: nsView)
             (nsView as? ClampedScrollView)?.clampToInsets()

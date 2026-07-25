@@ -69,9 +69,15 @@ public final class HighlighterSwiftBridge: SyntaxHighlighter, @unchecked Sendabl
         self.lightBackground = lightBackground ?? .clear
         self.darkBackground = darkBackground ?? .clear
         self.preferredFontNames = preferredFontNames
-        highlightCache.countLimit = 256
-        highlightCache.totalCostLimit = 2_000_000
-        failedCache.countLimit = 256
+        // A single 346 KB note holds 191 fenced blocks, and one embedder's whole
+        // library came to 231 — 90 % of a 256-slot ceiling, with the PDF exporter
+        // sharing the same instance. At that fill rate one export or one other
+        // code-heavy note evicts the open document's entries, and re-opening it
+        // pays the JavaScriptCore round-trip again (~53 ms for 191 blocks).
+        // The cost limit, not the count, is what should bound this cache.
+        highlightCache.countLimit = 4096
+        highlightCache.totalCostLimit = 8_000_000
+        failedCache.countLimit = 4096
         failedCache.totalCostLimit = 2_000_000
         applyAppearanceTheme()
 
