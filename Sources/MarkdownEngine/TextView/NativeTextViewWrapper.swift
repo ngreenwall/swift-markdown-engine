@@ -439,11 +439,23 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 context.coordinator.undoManagers.removeValue(forKey: key)
                 context.coordinator.undoContentSnapshots.removeValue(forKey: key)
             }
-            // Warm stacks too. This one matters far more than the dictionaries
-            // above: a retained stack is tens of megabytes of laid-out
-            // fragments, and without this it survives until two other documents
-            // happen to evict it.
-            context.coordinator.warmDocuments.prune(keeping: retained, current: documentId)
+            // Deliberately NOT the warm pool. Pruning it against this set was
+            // tried and reverted: the set is the embedder's TAB STRIP, which
+            // churns — navigating to a non-document surface and opening a note
+            // reorders it — and every churn emptied the pool. Measured: two
+            // consecutive `warmSwap.miss have=none` right after such a detour,
+            // the second costing 705 ms on a 346 KB note that had been warm
+            // moments earlier.
+            //
+            // It bought nothing either. The pool is already bounded by
+            // `WarmDocumentPolicy` on both document count and retained text, and
+            // that — not the tab strip — is the memory guarantee. Pruning on top
+            // could only make the pool smaller than its own budget, i.e. trade
+            // hits for memory that was never at risk.
+            //
+            // `WarmDocumentPool.prune(keeping:current:)` still exists for an
+            // embedder that genuinely needs to release a document early (a
+            // closed window, a deleted file).
         }
 
         let wtActive: Bool = {
