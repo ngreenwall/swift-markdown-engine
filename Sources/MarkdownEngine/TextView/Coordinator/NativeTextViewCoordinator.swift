@@ -90,6 +90,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// rebuild, which is how people actually move between notes.
     let warmDocuments = WarmDocumentPool()
 
+
     /// The document's own state, swappable as one unit — see DocumentSession.
     /// A TextKit-stack swap assigns this and nothing else, which is what makes
     /// it impossible to restore a document's text without its splice base.

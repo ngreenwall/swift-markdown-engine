@@ -399,6 +399,26 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         let tUpdate = DispatchTime.now().uptimeNanoseconds
         let tracingSwitch = isNodeSwitch || !context.coordinator.didInitialFormatting
         if tracingSwitch { PerfTrace.switchBegin(docLength: (text as NSString).length) }
+        // TEMP (empty-document-on-swipe): the invariant every pass must leave
+        // true is "what the view shows equals what the app handed in". Checked
+        // unconditionally, printed only when it fails, so a rapid swipe that
+        // blanks a document names itself instead of needing a repro.
+#if DEBUG
+        defer {
+            let expected = (text as NSString).length
+            let shown = (textView.string as NSString).length
+            if expected != shown {
+                let storage = textView.textStorage?.length ?? -1
+                let synced = (context.coordinator.lastSyncedText as NSString).length
+                print("‼️ DOC MISMATCH id=\(documentId) handedIn=\(expected) shown=\(shown)"
+                      + " storage=\(storage) lastSynced=\(synced)"
+                      + " switch=\(isNodeSwitch ? 1 : 0) didFormat=\(context.coordinator.didInitialFormatting ? 1 : 0)"
+                      + " rebuilding=\(context.coordinator.isRebuildingDocument ? 1 : 0)"
+                      + " contentMgr=\(textView.textLayoutManager?.textContentManager != nil ? 1 : 0)"
+                      + " pool=[\(context.coordinator.warmDocuments.traceSummary)]")
+            }
+        }
+#endif
         defer {
             if tracingSwitch {
                 // `@updateEnd` marks where updateNSView returned; everything after
@@ -643,9 +663,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 // Not warm: give the incoming document its own stack, so the one
                 // just captured keeps its layout instead of being written over.
                 if configuration.warmDocuments.isEnabled {
-                    let (storage, layoutManager, container) = context.coordinator.makeTextKitStack()
-                    _ = storage
-                    _ = layoutManager
+                    let (_, _, container) = context.coordinator.makeTextKitStack()
                     container.textView = textView
                 }
                 context.coordinator.session = DocumentSession()

@@ -20,6 +20,10 @@ extension NativeTextViewCoordinator {
     func updateCodeBlockSelection(textView: NSTextView, parsed: ParsedDocument? = nil, reason: String = "?") {
         let tCodeSel = DispatchTime.now().uptimeNanoseconds
         defer { PerfTrace.switchAdd("codeBlockSel(\(reason))", ms: PerfTrace.elapsedMs(since: tCodeSel)) }
+        // Mid-swap the string and the session's tokens describe different
+        // documents; whatever this computed would be wrong and is recomputed
+        // when the swap completes.
+        guard !isRebuildingDocument else { return }
         guard let textContainer = textView.textContainer else {
             onCodeBlockSelectionChange?([])
             return
@@ -86,6 +90,14 @@ extension NativeTextViewCoordinator {
 
         let selections: [CodeBlockSelection] = cachedCodeBlockTokens.compactMap { originalIndex, token in
             guard !activeTokenIndices.contains(originalIndex) else { return nil }
+            // Tokens and string must describe the same document. They did not
+            // once: repointing the text container during a warm swap makes
+            // AppKit reconfigure the view synchronously, and the bounds-change
+            // notification that follows re-entered here with the INCOMING string
+            // and the OUTGOING tokens — trapping on a range past the end. The
+            // ordering is fixed in `restoreWarmDocument`; this makes a stale
+            // pair unable to crash regardless of how it arises.
+            guard NSMaxRange(token.contentRange) <= nsText.length else { return nil }
             if let visibleRange, NSIntersectionRange(token.range, visibleRange).length == 0 { return nil }
             guard var boundingRect = textView.viewRect(forCharacterRange: token.range, using: layoutBridge) else { return nil }
 

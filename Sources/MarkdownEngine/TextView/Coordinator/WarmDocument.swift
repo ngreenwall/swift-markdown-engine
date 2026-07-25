@@ -192,6 +192,7 @@ extension NativeTextViewCoordinator {
 
     /// A fresh stack configured exactly like `makeNSView`'s, so a document that
     /// is not warm gets its own instead of reusing the outgoing document's.
+
     func makeTextKitStack() -> (NSTextContentStorage, NSTextLayoutManager, NSTextContainer) {
         let contentStorage = NSTextContentStorage()
         let layoutManager = NSTextLayoutManager()
@@ -239,11 +240,25 @@ extension NativeTextViewCoordinator {
             return false
         }
 
-        warm.container.textView = textView
+        // Order matters, and getting it wrong crashed: `container.textView = …`
+        // is not a pointer assignment. AppKit reconfigures the text view inside
+        // it — resizing it, which posts frame- and bounds-change notifications,
+        // which re-enter this engine's observers synchronously. Those observers
+        // read `textView.string` (already the INCOMING document) against the
+        // session's cached tokens (still the OUTGOING one) and trapped on a
+        // range past the end.
+        //
+        // So the document's state is installed BEFORE the swap, and the swap
+        // runs behind `isRebuildingDocument` so anything re-entrant bails out
+        // rather than acting on a half-swapped view.
         session = warm.session
         textView.baseContentHeight = warm.baseContentHeight
         textView.activeBottomOverscroll = warm.activeBottomOverscroll
         textView.lastFullMeasure = warm.lastFullMeasure
+
+        isRebuildingDocument = true
+        warm.container.textView = textView
+        isRebuildingDocument = false
 
         // Required: repointing the container schedules no viewport pass, so
         // without this the old document's pixels stay on screen.
