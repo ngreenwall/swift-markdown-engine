@@ -85,10 +85,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// `ensureLayout` at the end then redoes it from cold. The rebuild always
     /// finishes with a full layout, so anything forced before that is waste.
     var isRebuildingDocument: Bool = false
-    /// The one document kept laid out across a switch (see WarmDocument).
-    /// Exactly one, because retained layout costs tens of megabytes per large
-    /// document; a pool sized by bytes is the next step, not this one.
-    var warmDocument: WarmDocument?
+    /// Documents kept laid out across a switch (see WarmDocument). A small LRU
+    /// rather than a single slot: one slot makes A↔B free but A→B→C→A a full
+    /// rebuild, which is how people actually move between notes.
+    let warmDocuments = WarmDocumentPool()
 
     /// The document's own state, swappable as one unit — see DocumentSession.
     /// A TextKit-stack swap assigns this and nothing else, which is what makes

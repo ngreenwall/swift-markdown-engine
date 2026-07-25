@@ -602,27 +602,27 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             // across a file switch.
             textView.breakUndoCoalescing()
 
-            // Warm switch: look the INCOMING document up before the outgoing one
-            // overwrites the single warm slot, then hand the view back its own
-            // already-laid-out stack. Skipped entirely unless MD_WARM_SWITCH=1.
+            // Warm switch: claim the INCOMING document's stack out of the pool
+            // first, then put the outgoing one in. Taking before storing keeps
+            // the two independent — otherwise storing the outgoing document
+            // could evict the incoming one in the same breath.
+            // Skipped entirely unless MD_WARM_SWITCH=1.
             var incomingWarm: WarmDocument?
             if WarmDocument.isEnabled {
-                if let warm = context.coordinator.warmDocument, warm.documentId == documentId {
-                    incomingWarm = warm
-                } else {
+                incomingWarm = context.coordinator.warmDocuments.take(documentId)
+                if incomingWarm == nil {
                     PerfTrace.stamp("warmSwap.miss", 0,
-                                    "want=\(documentId) have=\(context.coordinator.warmDocument?.documentId ?? "none")")
+                                    "want=\(documentId) have=\(context.coordinator.warmDocuments.traceSummary)")
                 }
-                // The outgoing stack becomes the warm one — but only after its
-                // session is still the live one, i.e. before the swap below.
-                if let outgoingId = context.coordinator.documentId {
-                    context.coordinator.warmDocument = context.coordinator.captureWarmDocument(
-                        textView,
-                        documentId: outgoingId,
-                        storageText: context.coordinator.lastSyncedText
-                    )
-                } else {
-                    context.coordinator.warmDocument = nil
+                // The outgoing stack goes into the pool — while its session is
+                // still the live one, i.e. before the swap below.
+                if let outgoingId = context.coordinator.documentId,
+                   let outgoing = context.coordinator.captureWarmDocument(
+                       textView,
+                       documentId: outgoingId,
+                       storageText: context.coordinator.lastSyncedText
+                   ) {
+                    context.coordinator.warmDocuments.store(outgoing)
                 }
             }
 

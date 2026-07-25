@@ -22,8 +22,8 @@
 //  by documentId rather than by view.
 //
 //  The price is memory — roughly 66–95 MB of retained layout for a 346 KB
-//  document — which is why this holds exactly ONE document and is off unless
-//  `MD_WARM_SWITCH=1` is set.
+//  document — which is why `WarmDocumentPool` below holds a handful rather than
+//  everything, and why the whole thing is off unless `MD_WARM_SWITCH=1` is set.
 //
 
 import AppKit
@@ -47,6 +47,10 @@ final class WarmDocument {
     /// app's back (a rename sweep, an external editor) must rebuild, not reuse.
     let storageText: String
 
+    /// `storageText`'s length, computed once. The pool's budget reads this on
+    /// every store, and `String.count` walks the whole string each time.
+    let retainedCharacters: Int
+
     // Geometry the TEXT VIEW caches, which the stack does not carry. A stale
     // height here is the long→short scroll-jump class of bug, so it travels too.
     let baseContentHeight: CGFloat
@@ -68,6 +72,7 @@ final class WarmDocument {
         self.container = container
         self.session = session
         self.storageText = storageText
+        self.retainedCharacters = (storageText as NSString).length
         self.baseContentHeight = textView.baseContentHeight
         self.activeBottomOverscroll = textView.activeBottomOverscroll
         self.lastFullMeasure = textView.lastFullMeasure
@@ -97,6 +102,75 @@ final class WarmDocument {
 #else
     static var isEnabled: Bool { false }
 #endif
+}
+
+/// A small least-recently-used set of documents kept laid out.
+///
+/// One slot is not enough for how people actually move: it makes A↔B free and
+/// A→B→C→A a full rebuild, because the third document evicts the first.
+/// Measured on the note this was built for — 50 ms warm, 732 ms after one
+/// detour.
+///
+/// Bounded on BOTH count and total retained text, because neither alone is
+/// honest. Count ignores that one 346 KB note costs more than twenty ordinary
+/// ones; text length is only a proxy for the real cost, which is retained
+/// layout and is dominated by rendered elements (images, tables) rather than by
+/// characters. There is no cheap way to ask TextKit what a laid-out document
+/// weighs, so this bounds the two things it CAN measure and stays conservative:
+/// three documents, and roughly two large notes' worth of text between them.
+final class WarmDocumentPool {
+
+    /// Least-recently-used first, so eviction is `removeFirst()`.
+    private var documents: [WarmDocument] = []
+
+    private let maxDocuments: Int
+    private let maxRetainedCharacters: Int
+
+    init(maxDocuments: Int = 3, maxRetainedCharacters: Int = 600_000) {
+        self.maxDocuments = maxDocuments
+        self.maxRetainedCharacters = maxRetainedCharacters
+    }
+
+    /// Remove and return the stack held for `documentId`, if any.
+    ///
+    /// Removal is not an optimisation, it is the contract: the caller is about
+    /// to hand this stack back to the text view, and a pool still holding it
+    /// would be free to hand the same one out again or evict it while live.
+    func take(_ documentId: String) -> WarmDocument? {
+        guard let index = documents.firstIndex(where: { $0.documentId == documentId }) else { return nil }
+        return documents.remove(at: index)
+    }
+
+    /// Keep `document` warm, evicting the least recently used until the pool is
+    /// back inside both bounds.
+    func store(_ document: WarmDocument) {
+        // A second stack for the same document would be a second answer to the
+        // same question — drop the older one rather than race it.
+        documents.removeAll { $0.documentId == document.documentId }
+        documents.append(document)
+
+        while documents.count > maxDocuments {
+            documents.removeFirst()
+        }
+        // `count > 1` so the newest document is never evicted for being large on
+        // its own. A note that exceeds the budget by itself is exactly the note
+        // worth keeping warm; refusing it would leave the slowest case slow.
+        while documents.count > 1,
+              documents.reduce(0, { $0 + $1.retainedCharacters }) > maxRetainedCharacters {
+            documents.removeFirst()
+        }
+    }
+
+    func removeAll() {
+        documents.removeAll()
+    }
+
+    /// Least- to most-recently-used ids, for the switch trace. Without it a miss
+    /// only says what was wanted, not what was held instead — which is the half
+    /// that explains WHY it missed.
+    var traceSummary: String {
+        documents.isEmpty ? "none" : documents.map(\.documentId).joined(separator: ",")
+    }
 }
 
 extension NativeTextViewCoordinator {
