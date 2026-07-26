@@ -465,17 +465,22 @@ enum MarkdownASTStyler {
         children: [InlineNode], font: NSFont, ctx: Ctx, into attrs: inout [StyledRange]
     ) {
         attrs.append((range, [.spellingState: 0]))
-        var urlString = ctx.ns.substring(with: urlRange)
-        if !urlString.contains("://") { urlString = "https://\(urlString)" }
+        let urlString = ctx.ns.substring(with: urlRange)
         let isActive = ctx.isActive(range)
-        if let url = URL(string: urlString) {
-            if isActive {
+        if isActive {
+            attrs.append((textRange, [
+                .foregroundColor: ctx.theme.link.withAlphaComponent(ctx.config.link.activeLinkAlpha),
+            ]))
+        } else {
+            // A scheme-less href (e.g. `note.md`) is a relative path, not a bare
+            // domain missing "https://" — leave it a String so it flows through
+            // WikiLinkService.resolveIdentifier's `link as? String` branch and
+            // reaches the host app's click routing instead of AppKit silently
+            // trying to open "https://note.md" in a browser.
+            let linkValue: Any? = urlString.contains("://") ? URL(string: urlString) : urlString
+            if let linkValue {
                 attrs.append((textRange, [
-                    .foregroundColor: ctx.theme.link.withAlphaComponent(ctx.config.link.activeLinkAlpha),
-                ]))
-            } else {
-                attrs.append((textRange, [
-                    .link: url,
+                    .link: linkValue,
                     .underlineStyle: NSUnderlineStyle.single.rawValue,
                     .foregroundColor: ctx.theme.link,
                 ]))

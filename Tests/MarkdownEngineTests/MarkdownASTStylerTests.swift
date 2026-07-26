@@ -101,6 +101,31 @@ struct MarkdownASTStylerTests {
         #expect(spellingStates(intersecting: inlineSpan).contains(0))
         #expect(spellingStates(intersecting: prose).isEmpty)
     }
+
+    /// `.link` attribute lookup at a position, mirroring `font(in:at:)` above.
+    private func linkValue(in attrs: [StyledRange], at pos: Int) -> Any? {
+        var result: Any?
+        for entry in attrs where NSLocationInRange(pos, entry.range) {
+            if let v = entry.attributes[.link] { result = v }
+        }
+        return result
+    }
+
+    @Test("absolute link (has a scheme) styles .link as a URL")
+    func absoluteLinkStylesAsURL() {
+        let text = "see [site](https://example.com)"
+        let attrs = MarkdownASTStyler.styleAttributes(text: text, fontName: fontName, fontSize: base)
+        let pos = (text as NSString).range(of: "site").location
+        #expect(linkValue(in: attrs, at: pos) is URL)
+    }
+
+    @Test("relative link (no scheme) styles .link as the raw path string, not a rewritten https URL")
+    func relativeLinkStylesAsRawString() {
+        let text = "see [note](wren-test.md)"
+        let attrs = MarkdownASTStyler.styleAttributes(text: text, fontName: fontName, fontSize: base)
+        let pos = (text as NSString).range(of: "note").location
+        #expect(linkValue(in: attrs, at: pos) as? String == "wren-test.md")
+    }
 }
 
 /// Canonical, order-independent string of styled ranges so two style runs can be
