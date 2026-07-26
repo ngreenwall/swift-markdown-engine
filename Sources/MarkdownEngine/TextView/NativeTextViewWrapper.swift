@@ -239,6 +239,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.minOverscrollPoints = configuration.overscroll.minPoints
         context.coordinator.configuration = configuration
         textView.insertionPointColor = configuration.theme.bodyText
+        // Without this, AppKit's default linkTextAttributes (system blue)
+        // override the styler's theme.link foreground on `.link` ranges —
+        // set at construction so the theme color is what first draws.
+        textView.linkTextAttributes = [
+            .foregroundColor: configuration.theme.link,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand,
+        ]
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = true
@@ -509,6 +517,21 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.insertionPointColor = isEditable ? context.coordinator.configuration.theme.bodyText : .clear
+        // Keep the link color in sync if the embedder retints the theme.
+        let desiredLinkColor = configuration.theme.link
+        if (textView.linkTextAttributes?[.foregroundColor] as? NSColor) != desiredLinkColor {
+            textView.linkTextAttributes = [
+                .foregroundColor: desiredLinkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .cursor: NSCursor.pointingHand,
+            ]
+            // TextKit 2 bakes link attributes into cached layout fragments;
+            // without invalidation a plain redraw keeps the old color.
+            if let layoutManager = textView.textLayoutManager {
+                layoutManager.invalidateLayout(for: layoutManager.documentRange)
+            }
+            textView.needsDisplay = true
+        }
         let fontChanged = (context.coordinator.fontName != fontName) || (context.coordinator.fontSize != fontSize)
         if let pendingInlineReplacement {
             if pendingInlineReplacement.documentId == documentId,
