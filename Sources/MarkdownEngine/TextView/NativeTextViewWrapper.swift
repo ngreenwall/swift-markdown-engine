@@ -341,8 +341,11 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
                 let currentWidth = scrollView.contentView.bounds.width
                 guard abs(currentWidth - lastTableRestyleWidth) > 4 else { return }
                 lastTableRestyleWidth = currentWidth
-                // Cheap gate: no pipe character → no table → nothing to re-wrap.
-                guard textView.string.contains("|") else { return }
+                // Cheap gate: no pipe/image marker → nothing needs a re-wrap
+                // (tables re-wrap cells; "![" covers both image links and
+                // ![[embeds]], which recompute their display size from the
+                // container width the same way tables recompute cell width).
+                guard textView.string.contains("|") || textView.string.contains("![") else { return }
                 let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
                 guard fullRange.length > 0 else { return }
                 context.coordinator.restyleParagraphs([fullRange], in: textView)

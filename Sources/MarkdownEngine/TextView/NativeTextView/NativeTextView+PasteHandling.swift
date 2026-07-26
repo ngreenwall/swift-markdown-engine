@@ -67,7 +67,9 @@ extension NativeTextView {
         insertText(prepared, replacementRange: sel)
     }
 
-    private func insertBlockEmbed(_ embed: String) {
+    /// Internal, not private: `NativeTextView+DragHandling.swift` reuses this
+    /// to insert a dropped image the same way a pasted one is inserted.
+    func insertBlockEmbed(_ embed: String) {
         let sel = selectedRange()
         let nsText = string as NSString
         var prefix = ""
