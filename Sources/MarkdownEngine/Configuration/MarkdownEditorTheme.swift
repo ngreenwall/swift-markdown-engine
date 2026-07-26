@@ -79,6 +79,15 @@ public struct MarkdownEditorTheme: Sendable {
     /// Background color used for `==highlight==` inline markup.
     public var highlightColor: NSColor
 
+    // MARK: Task checkboxes
+
+    /// Tint for a checked task checkbox glyph. Defaults to `bodyText` so
+    /// embedders that don't customize it see no appearance change.
+    public var checkboxCheckedColor: NSColor
+    /// Tint for an unchecked task checkbox glyph. Defaults to `mutedText`
+    /// so embedders that don't customize it see no appearance change.
+    public var checkboxUncheckedColor: NSColor
+
     // MARK: Init
 
     public init(
@@ -93,7 +102,9 @@ public struct MarkdownEditorTheme: Sendable {
         latexLightModeText: NSColor = .black,
         latexDarkModeText: NSColor = .white,
         strikethroughColor: NSColor = .labelColor,
-        highlightColor: NSColor = .systemOrange.withAlphaComponent(0.4)
+        highlightColor: NSColor = .systemOrange.withAlphaComponent(0.4),
+        checkboxCheckedColor: NSColor? = nil,
+        checkboxUncheckedColor: NSColor? = nil
     ) {
         self.bodyText = bodyText
         self.mutedText = mutedText
@@ -107,6 +118,8 @@ public struct MarkdownEditorTheme: Sendable {
         self.latexDarkModeText = latexDarkModeText
         self.strikethroughColor = strikethroughColor
         self.highlightColor = highlightColor
+        self.checkboxCheckedColor = checkboxCheckedColor ?? bodyText
+        self.checkboxUncheckedColor = checkboxUncheckedColor ?? mutedText
     }
 
     /// System-native palette built from `NSColor` dynamic system colors.

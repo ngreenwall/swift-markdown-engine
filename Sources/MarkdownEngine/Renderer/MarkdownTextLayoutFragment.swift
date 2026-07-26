@@ -577,11 +577,11 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
             let iconInset = max(0.0, size * 0.01)
             let iconRect = boxRect.insetBy(dx: iconInset, dy: iconInset)
-            let symbolName = isChecked ? "checkmark.square.fill" : "square"
+            let symbolName = isChecked ? "checkmark.circle.fill" : "circle"
             if let baseSymbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
                 let sizeConfig = NSImage.SymbolConfiguration(pointSize: iconRect.height, weight: .regular)
                 let theme = (textLayoutManager?.textContainer?.textView as? NativeTextView)?.configuration.theme ?? .default
-                let tint = isChecked ? theme.bodyText : theme.mutedText
+                let tint = isChecked ? theme.checkboxCheckedColor : theme.checkboxUncheckedColor
                 let colorConfig = NSImage.SymbolConfiguration(hierarchicalColor: tint)
                 let symbolConfig = sizeConfig.applying(colorConfig)
                 let symbol = baseSymbol.withSymbolConfiguration(symbolConfig) ?? baseSymbol
