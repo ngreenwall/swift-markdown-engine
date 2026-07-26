@@ -94,6 +94,7 @@ struct MarkdownLists {
         if replacementString.count == 1,
            let ch = replacementString.first,
            ch != ">" && ch != "[" && ch != "(" && ch != "{" &&
+           ch != "]" && ch != ")" && ch != "}" &&
            ch != "\t" && ch != " " && ch != "\n" {
             return true
         }
@@ -122,6 +123,21 @@ struct MarkdownLists {
             if previousChar == "-" {
                 MarkdownLists.performEdit(textView, replace: previousCharRange, with: "→")
                 textView.setSelectedRange(NSRange(location: insertionLocation, length: 0))
+                return false
+            }
+        }
+
+        // Overtype: typing a closing bracket right before its auto-inserted match
+        // moves the caret past it instead of inserting a duplicate (standard
+        // editor behavior). Fixes `- [ ]` checkbox typing leaving a stray `]`.
+        if autoClosePairsEnabled,
+           affectedCharRange.length == 0,
+           replacementString == "]" || replacementString == ")" || replacementString == "}" {
+            let nsText = textView.string as NSString
+            let insertionLocation = affectedCharRange.location
+            if insertionLocation < nsText.length,
+               nsText.substring(with: NSRange(location: insertionLocation, length: 1)) == replacementString {
+                textView.setSelectedRange(NSRange(location: insertionLocation + 1, length: 0))
                 return false
             }
         }
