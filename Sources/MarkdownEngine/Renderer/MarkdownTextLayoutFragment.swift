@@ -228,7 +228,7 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         let topRadius = isFirst ? style.cornerRadius : 0
         let bottomRadius = isLast ? style.cornerRadius : 0
 
-        let selectionRects = selectionRectsInDrawCoordinates(drawPoint: point, snappedY: snappedY, snappedMaxY: snappedMaxY)
+        let selectionRects = selectionRectsInDrawCoordinates(drawPoint: point, bgRect: bgRect, scale: scale)
         color.setFill()
         if selectionRects.isEmpty {
             codeBlockFillPath(bgRect, topRadius: topRadius, bottomRadius: bottomRadius).fill()
@@ -251,7 +251,19 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     /// Returns active text-selection rectangles intersecting this fragment, in
     /// the same draw-relative coordinate system used by `drawCodeBlockBackground`.
-    private func selectionRectsInDrawCoordinates(drawPoint: CGPoint, snappedY: CGFloat, snappedMaxY: CGFloat) -> [CGRect] {
+    ///
+    /// `enumerateTextSegments` fires once per VISUAL ROW of this fragment, which
+    /// is more than one when the fragment's source line wraps (narrow window).
+    /// Each row gets its own vertical extent (not the whole fragment's) so
+    /// overlapping evenOdd cutouts from different rows don't cancel/over-fill
+    /// each other. Interior lines of a multi-line selection (this fragment's
+    /// entire content is selected) get a cutout extended to the block's full
+    /// width instead of the glyph-tight segment width, so a whole-block
+    /// selection reads as one continuous bar rather than a per-line staircase;
+    /// partially-selected first/last lines stay glyph-tight (caret-accurate).
+    // internal (not private) so `@testable import` can drive it directly in
+    // ListHandlerBracketOvertypeTests-style geometry regression tests.
+    func selectionRectsInDrawCoordinates(drawPoint: CGPoint, bgRect: CGRect, scale: CGFloat) -> [CGRect] {
         guard let tlm = textLayoutManager else { return [] }
         var rects: [CGRect] = []
 
@@ -267,16 +279,19 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
                 guard interStart.compare(interEnd) == .orderedAscending,
                       let intersection = NSTextRange(location: interStart, end: interEnd) else { continue }
 
+                let isFullLineSelection = interStart.compare(myRange.location) == .orderedSame
+                    && interEnd.compare(myRange.endLocation) == .orderedSame
+
                 tlm.enumerateTextSegments(in: intersection, type: .selection, options: []) { _, segFrame, _, _ in
-                    // Expand vertically to match the bgRect's snapped span so the
-                    // even-odd cut-out is geometrically congruent with the fill.
-                    let drawRect = CGRect(
-                        x: segFrame.origin.x + dx,
-                        y: snappedY,
-                        width: segFrame.width,
-                        height: snappedMaxY - snappedY
-                    )
-                    rects.append(drawRect)
+                    let rawRowY = drawPoint.y + (segFrame.origin.y - layoutFragmentFrame.origin.y)
+                    let rawRowMaxY = rawRowY + segFrame.height
+                    let rowY = max(bgRect.minY, floor(rawRowY * scale) / scale)
+                    let rowMaxY = min(bgRect.maxY, ceil(rawRowMaxY * scale) / scale)
+                    guard rowMaxY > rowY else { return true }
+
+                    let rectX = segFrame.origin.x + dx
+                    let rectWidth = isFullLineSelection ? (bgRect.maxX - rectX) : segFrame.width
+                    rects.append(CGRect(x: rectX, y: rowY, width: rectWidth, height: rowMaxY - rowY))
                     return true
                 }
             }
