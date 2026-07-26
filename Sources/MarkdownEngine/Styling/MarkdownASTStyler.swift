@@ -499,11 +499,12 @@ enum MarkdownASTStyler {
         var contentAttrs: [NSAttributedString.Key: Any] = [:]
         if let linkID { contentAttrs[.wikiLinkID] = linkID }
         if !ctx.isActive(range) {
-            // Resolve by the stable UUID when present 
+            // Resolve by the stable UUID when present
             let exists = ctx.config.services.wikiLinks.resolve(displayName: linkID ?? nodeName, range: name)?.exists ?? false
-            if exists {
-                contentAttrs[.link] = linkID ?? nodeName
-            } else {
+            // Set .link regardless of exists: an unresolved link still needs
+            // to be clickable so the host app's create-on-click flow can run.
+            contentAttrs[.link] = linkID ?? nodeName
+            if !exists {
                 contentAttrs[.foregroundColor] = ctx.theme.disabledText
             }
         }

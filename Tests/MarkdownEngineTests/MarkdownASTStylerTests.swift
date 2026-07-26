@@ -126,6 +126,36 @@ struct MarkdownASTStylerTests {
         let pos = (text as NSString).range(of: "note").location
         #expect(linkValue(in: attrs, at: pos) as? String == "wren-test.md")
     }
+
+    /// Only resolves a wikilink named "Existing"; everything else is unresolved.
+    private struct FakeWikiLinkResolver: WikiLinkResolver {
+        func resolve(displayName: String, range: NSRange) -> WikiLinkResolution? {
+            WikiLinkResolution(id: displayName, exists: displayName == "Existing")
+        }
+    }
+
+    @Test("resolved wikilink still styles .link (regression guard)")
+    func resolvedWikiLinkStylesLink() {
+        let text = "see [[Existing]]"
+        let config = MarkdownEditorConfiguration(services: .init(wikiLinks: FakeWikiLinkResolver()))
+        let attrs = MarkdownASTStyler.styleAttributes(text: text, fontName: fontName, fontSize: base, configuration: config)
+        let pos = (text as NSString).range(of: "Existing").location
+        #expect(linkValue(in: attrs, at: pos) as? String == "Existing")
+    }
+
+    @Test("unresolved wikilink now also styles .link, so create-on-click can fire")
+    func unresolvedWikiLinkStylesLinkToo() {
+        let text = "see [[Brand New Note]]"
+        let config = MarkdownEditorConfiguration(services: .init(wikiLinks: FakeWikiLinkResolver()))
+        let attrs = MarkdownASTStyler.styleAttributes(text: text, fontName: fontName, fontSize: base, configuration: config)
+        let pos = (text as NSString).range(of: "Brand New Note").location
+        #expect(linkValue(in: attrs, at: pos) as? String == "Brand New Note")
+        // Still styled as disabled/muted, not the active link color.
+        let hasDisabledColor = attrs.contains { entry in
+            NSLocationInRange(pos, entry.range) && entry.attributes[.foregroundColor] != nil
+        }
+        #expect(hasDisabledColor)
+    }
 }
 
 /// Canonical, order-independent string of styled ranges so two style runs can be
