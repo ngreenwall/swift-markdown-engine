@@ -426,12 +426,9 @@ extension NativeTextViewCoordinator {
     }
 
     public func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-        NSLog("WREN-DEBUG clickedOnLink fired: link=\(link) charIndex=\(charIndex)")
         guard let target = WikiLinkService.resolveIdentifier(link: link, textView: textView, at: charIndex) else {
-            NSLog("WREN-DEBUG resolveIdentifier returned nil")
             return false
         }
-        NSLog("WREN-DEBUG resolveIdentifier returned target=\(target)")
         // Direkt deaktivieren, bevor der Navigation-Callback läuft.
         self.isWikiLinkActive = false
         DispatchQueue.main.async {
