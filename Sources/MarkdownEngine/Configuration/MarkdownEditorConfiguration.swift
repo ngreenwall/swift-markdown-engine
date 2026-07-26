@@ -229,15 +229,29 @@ public struct CodeBlockStyle: Sendable {
     public var paragraphSpacing: CGFloat
     /// Left/right indent (in points) so code blocks don't run into the gutter.
     public var horizontalIndent: CGFloat
+    /// Corner radius applied to the code-block background fill. 0 = square
+    /// corners (default, matches the historical look).
+    public var cornerRadius: CGFloat
+    /// Border stroke color drawn around the code-block background. `nil` = no
+    /// border (default).
+    public var borderColor: NSColor?
+    /// Border stroke width, used only when `borderColor` is set.
+    public var borderWidth: CGFloat
 
     public init(
         fontSizeScale: CGFloat = 0.85,
         paragraphSpacing: CGFloat = 2.0,
-        horizontalIndent: CGFloat = 12.0
+        horizontalIndent: CGFloat = 12.0,
+        cornerRadius: CGFloat = 0,
+        borderColor: NSColor? = nil,
+        borderWidth: CGFloat = 1.0
     ) {
         self.fontSizeScale = fontSizeScale
         self.paragraphSpacing = paragraphSpacing
         self.horizontalIndent = horizontalIndent
+        self.cornerRadius = cornerRadius
+        self.borderColor = borderColor
+        self.borderWidth = borderWidth
     }
 
     public static let `default` = CodeBlockStyle()

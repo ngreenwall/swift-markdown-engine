@@ -222,11 +222,19 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             height: snappedMaxY - snappedY
         )
 
+        let style = (textLayoutManager?.textContainer?.textView as? NativeTextView)?.configuration.codeBlock ?? .default
+        let isFirst = isFirstLineOfCodeBlock(range: range, ts: ts)
+        let isLast = isLastLineOfCodeBlock(range: range, ts: ts)
+        let topRadius = isFirst ? style.cornerRadius : 0
+        let bottomRadius = isLast ? style.cornerRadius : 0
+
         let selectionRects = selectionRectsInDrawCoordinates(drawPoint: point, snappedY: snappedY, snappedMaxY: snappedMaxY)
         color.setFill()
         if selectionRects.isEmpty {
-            NSBezierPath(rect: bgRect).fill()
+            codeBlockFillPath(bgRect, topRadius: topRadius, bottomRadius: bottomRadius).fill()
         } else {
+            // Rounding + evenOdd selection cutouts together isn't worth the complexity
+            // here; fall back to a plain rect while a selection is active.
             let path = NSBezierPath()
             path.windingRule = .evenOdd
             path.appendRect(bgRect)
@@ -234,6 +242,10 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
                 path.appendRect(r.intersection(bgRect))
             }
             path.fill()
+        }
+
+        if let borderColor = style.borderColor, style.borderWidth > 0 {
+            strokeCodeBlockBorder(bgRect, isFirst: isFirst, isLast: isLast, radius: style.cornerRadius, color: borderColor, width: style.borderWidth)
         }
     }
 
@@ -283,6 +295,139 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         return abs(colorRGB.redComponent - currentBgRGB.redComponent) < tolerance &&
                abs(colorRGB.greenComponent - currentBgRGB.greenComponent) < tolerance &&
                abs(colorRGB.blueComponent - currentBgRGB.blueComponent) < tolerance
+    }
+
+    /// Code blocks are laid out as one `MarkdownTextLayoutFragment` per source
+    /// line (each fenced-block line is its own paragraph), so the seamless
+    /// full-width fill is actually several fragments drawing edge-to-edge.
+    /// These check whether this fragment is the first/last line of its block
+    /// by looking at the code-background attribute just outside its range,
+    /// so only the outer corners get rounded and interior seams stay flat.
+    private func isFirstLineOfCodeBlock(range: NSRange, ts: NSTextStorage) -> Bool {
+        guard range.location > 0 else { return true }
+        guard let prevColor = ts.attribute(.backgroundColor, at: range.location - 1, effectiveRange: nil) as? NSColor else {
+            return true
+        }
+        return !isCodeBlockBackgroundColor(prevColor)
+    }
+
+    private func isLastLineOfCodeBlock(range: NSRange, ts: NSTextStorage) -> Bool {
+        let nextIndex = range.location + range.length
+        guard nextIndex < ts.length else { return true }
+        guard let nextColor = ts.attribute(.backgroundColor, at: nextIndex, effectiveRange: nil) as? NSColor else {
+            return true
+        }
+        return !isCodeBlockBackgroundColor(nextColor)
+    }
+
+    /// Closed fill path for a code-block fragment's background, rounding only
+    /// the corners the caller asks for (0 radius = square, matching a plain rect).
+    private func codeBlockFillPath(_ rect: CGRect, topRadius: CGFloat, bottomRadius: CGFloat) -> NSBezierPath {
+        guard topRadius > 0 || bottomRadius > 0 else { return NSBezierPath(rect: rect) }
+        let kappa: CGFloat = 0.5522847498
+        let minX = rect.minX, maxX = rect.maxX, minY = rect.minY, maxY = rect.maxY
+        let tr = max(0, min(topRadius, min(rect.width, rect.height) / 2))
+        let br = max(0, min(bottomRadius, min(rect.width, rect.height) / 2))
+
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: minX, y: minY + tr))
+        if tr > 0 {
+            path.curve(
+                to: CGPoint(x: minX + tr, y: minY),
+                controlPoint1: CGPoint(x: minX, y: minY + tr - tr * kappa),
+                controlPoint2: CGPoint(x: minX + tr - tr * kappa, y: minY)
+            )
+        }
+        path.line(to: CGPoint(x: maxX - tr, y: minY))
+        if tr > 0 {
+            path.curve(
+                to: CGPoint(x: maxX, y: minY + tr),
+                controlPoint1: CGPoint(x: maxX - tr + tr * kappa, y: minY),
+                controlPoint2: CGPoint(x: maxX, y: minY + tr - tr * kappa)
+            )
+        }
+        path.line(to: CGPoint(x: maxX, y: maxY - br))
+        if br > 0 {
+            path.curve(
+                to: CGPoint(x: maxX - br, y: maxY),
+                controlPoint1: CGPoint(x: maxX, y: maxY - br + br * kappa),
+                controlPoint2: CGPoint(x: maxX - br + br * kappa, y: maxY)
+            )
+        }
+        path.line(to: CGPoint(x: minX + br, y: maxY))
+        if br > 0 {
+            path.curve(
+                to: CGPoint(x: minX, y: maxY - br),
+                controlPoint1: CGPoint(x: minX + br - br * kappa, y: maxY),
+                controlPoint2: CGPoint(x: minX, y: maxY - br + br * kappa)
+            )
+        }
+        path.close()
+        return path
+    }
+
+    /// Strokes the outer border of a code-block fragment: left/right edges
+    /// always (they're colinear across every line in the block and read as one
+    /// continuous border), plus a rounded top edge on the first line and a
+    /// rounded bottom edge on the last line. Interior fragments get no
+    /// top/bottom stroke so lines within a block don't show horizontal seams.
+    private func strokeCodeBlockBorder(_ rect: CGRect, isFirst: Bool, isLast: Bool, radius: CGFloat, color: NSColor, width: CGFloat) {
+        let kappa: CGFloat = 0.5522847498
+        let minX = rect.minX, maxX = rect.maxX, minY = rect.minY, maxY = rect.maxY
+        let tr = isFirst ? max(0, min(radius, min(rect.width, rect.height) / 2)) : 0
+        let br = isLast ? max(0, min(radius, min(rect.width, rect.height) / 2)) : 0
+
+        let path = NSBezierPath()
+        path.lineWidth = width
+
+        path.move(to: CGPoint(x: minX, y: minY + tr))
+        path.line(to: CGPoint(x: minX, y: maxY - br))
+        path.move(to: CGPoint(x: maxX, y: minY + tr))
+        path.line(to: CGPoint(x: maxX, y: maxY - br))
+
+        if isFirst {
+            let top = NSBezierPath()
+            top.move(to: CGPoint(x: minX, y: minY + tr))
+            if tr > 0 {
+                top.curve(
+                    to: CGPoint(x: minX + tr, y: minY),
+                    controlPoint1: CGPoint(x: minX, y: minY + tr - tr * kappa),
+                    controlPoint2: CGPoint(x: minX + tr - tr * kappa, y: minY)
+                )
+            }
+            top.line(to: CGPoint(x: maxX - tr, y: minY))
+            if tr > 0 {
+                top.curve(
+                    to: CGPoint(x: maxX, y: minY + tr),
+                    controlPoint1: CGPoint(x: maxX - tr + tr * kappa, y: minY),
+                    controlPoint2: CGPoint(x: maxX, y: minY + tr - tr * kappa)
+                )
+            }
+            path.append(top)
+        }
+        if isLast {
+            let bottom = NSBezierPath()
+            bottom.move(to: CGPoint(x: minX, y: maxY - br))
+            if br > 0 {
+                bottom.curve(
+                    to: CGPoint(x: minX + br, y: maxY),
+                    controlPoint1: CGPoint(x: minX, y: maxY - br + br * kappa),
+                    controlPoint2: CGPoint(x: minX + br - br * kappa, y: maxY)
+                )
+            }
+            bottom.line(to: CGPoint(x: maxX - br, y: maxY))
+            if br > 0 {
+                bottom.curve(
+                    to: CGPoint(x: maxX, y: maxY - br),
+                    controlPoint1: CGPoint(x: maxX - br + br * kappa, y: maxY),
+                    controlPoint2: CGPoint(x: maxX, y: maxY - br + br * kappa)
+                )
+            }
+            path.append(bottom)
+        }
+
+        color.setStroke()
+        path.stroke()
     }
 
     // MARK: - LaTeX / Block Image Helpers
