@@ -429,10 +429,15 @@ extension NativeTextViewCoordinator {
         guard let target = WikiLinkService.resolveIdentifier(link: link, textView: textView, at: charIndex) else {
             return false
         }
+        let isWikiLink = textView.textStorage?.attribute(.isWikiLink, at: charIndex, effectiveRange: nil) as? Bool == true
         // Direkt deaktivieren, bevor der Navigation-Callback läuft.
         self.isWikiLinkActive = false
         DispatchQueue.main.async {
-            self.onLinkClick?(target)
+            if isWikiLink, let onWikiLinkClick = self.onWikiLinkClick {
+                onWikiLinkClick(target)
+            } else {
+                self.onLinkClick?(target)
+            }
         }
         return true
     }

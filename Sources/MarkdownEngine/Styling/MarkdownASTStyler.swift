@@ -504,6 +504,7 @@ enum MarkdownASTStyler {
             // Set .link regardless of exists: an unresolved link still needs
             // to be clickable so the host app's create-on-click flow can run.
             contentAttrs[.link] = linkID ?? nodeName
+            contentAttrs[.isWikiLink] = true
             if !exists {
                 contentAttrs[.foregroundColor] = ctx.theme.disabledText
             }

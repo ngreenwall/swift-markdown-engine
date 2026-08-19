@@ -13,6 +13,17 @@ import Foundation
 extension NSAttributedString.Key {
     public static let wikiLinkID = NSAttributedString.Key("NodeLinkID")
     public static let taskCheckbox = NSAttributedString.Key("TaskCheckbox")
+    /// Set (to `true`) on a `.link`-attributed range that came from a
+    /// `[[WikiLink]]` AST node, as opposed to a regular `[text](url)` link —
+    /// the two are indistinguishable from the `.link` value alone once both
+    /// have been reduced to a bare display string (an unresolved wikilink's
+    /// `.link` value is its display name, same shape as a relative path).
+    /// Unlike `.wikiLinkID`, this is set unconditionally on every wikilink,
+    /// not just ones with a resolved storage-form id — it exists purely to
+    /// let click routing (`NativeTextViewCoordinator.onWikiLinkClick` vs.
+    /// `onLinkClick`) tell the two link kinds apart, and has no bearing on
+    /// storage-form round-tripping.
+    public static let isWikiLink = NSAttributedString.Key("MarkdownIsWikiLink")
 }
 
 enum MarkdownTokenKind {

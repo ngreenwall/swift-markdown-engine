@@ -80,6 +80,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// resolved opaque identifier (or the display name when no resolver
     /// was supplied).
     public var onLinkClick: ((String) -> Void)?
+    /// Fires instead of `onLinkClick` for a click on a `[[Name]]` wikilink
+    /// specifically, distinguishing it from a regular `[text](url)` link —
+    /// the two are otherwise indistinguishable once reduced to `onLinkClick`'s
+    /// bare `String` (an unresolved wikilink's target is its display name,
+    /// the same shape as a relative path). Falls back to `onLinkClick` when
+    /// left `nil`, so embedders that only care about one callback keep
+    /// routing both link kinds through it unchanged.
+    public var onWikiLinkClick: ((String) -> Void)?
     /// Fires whenever the caret rect inside an active wiki-link changes,
     /// so embedders can position a follow-the-caret UI.
     public var onCaretRectChange: ((CGRect) -> Void)?
@@ -136,6 +144,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         isEditable: Bool = true,
         onPasteImage: ((NSPasteboard) -> String?)? = nil,
         onLinkClick: ((String) -> Void)? = nil,
+        onWikiLinkClick: ((String) -> Void)? = nil,
         onCaretRectChange: ((CGRect) -> Void)? = nil,
         onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)? = nil,
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
@@ -158,6 +167,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.isEditable = isEditable
         self.onPasteImage = onPasteImage
         self.onLinkClick = onLinkClick
+        self.onWikiLinkClick = onWikiLinkClick
         self.onCaretRectChange = onCaretRectChange
         self.onBuildContextMenu = onBuildContextMenu
         self.onInlineSelectionChange = onInlineSelectionChange
@@ -313,6 +323,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         context.coordinator.onLinkClick = onLinkClick
+        context.coordinator.onWikiLinkClick = onWikiLinkClick
 
         textView.recalcOverscroll(for: scrollView)
         textView.setPlaceholder(placeholder)
@@ -627,6 +638,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         context.coordinator.onLinkClick = onLinkClick
+        context.coordinator.onWikiLinkClick = onWikiLinkClick
         context.coordinator.didInitialFormatting = true
     }
 

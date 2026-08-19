@@ -59,6 +59,13 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var layoutBridge: LayoutBridge?
     var layoutDelegate: MarkdownLayoutManagerDelegate?
     var onLinkClick: ((String) -> Void)?
+    /// Fires instead of `onLinkClick` for a click on a `[[Name]]` wikilink
+    /// specifically (distinguished via the `.isWikiLink` attribute, set
+    /// unconditionally by `MarkdownASTStyler.styleWikiLink`) — falls back to
+    /// `onLinkClick` when the embedder hasn't set this, so embedders that
+    /// only route one callback (routing both link kinds the same way) keep
+    /// working unchanged.
+    var onWikiLinkClick: ((String) -> Void)?
     var onCaretRectChange: ((CGRect) -> Void)?
     /// Embedder hook to build the right-click menu (the engine ships none). Gets the
     /// default menu + current selection range, returns the menu to show.

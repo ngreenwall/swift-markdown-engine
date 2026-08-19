@@ -156,6 +156,39 @@ struct MarkdownASTStylerTests {
         }
         #expect(hasDisabledColor)
     }
+
+    /// `.link` attribute lookup at a position, mirroring `linkValue(in:at:)`.
+    private func attributeValue(_ key: NSAttributedString.Key, in attrs: [StyledRange], at pos: Int) -> Any? {
+        var result: Any?
+        for entry in attrs where NSLocationInRange(pos, entry.range) {
+            if let v = entry.attributes[key] { result = v }
+        }
+        return result
+    }
+
+    /// A wikilink and a regular link both reduce to the same bare-`String`
+    /// `.link` value once unresolved (see the two tests above), so click
+    /// routing can't tell them apart from `.link` alone — `.isWikiLink` is
+    /// the attribute that lets it. Covers the specific case that broke
+    /// downstream: a wikilink display name that happens to look like a file
+    /// path (`[[test.md]]`), which `.link`'s shape alone can't distinguish
+    /// from a real relative link to `test.md`.
+    @Test("wikilink sets .isWikiLink; regular link (even one shaped like a wikilink extension) does not")
+    func isWikiLinkDistinguishesFromRegularLink() {
+        let text = "[[test.md]] and [reg](test.md)"
+        let config = MarkdownEditorConfiguration(services: .init(wikiLinks: FakeWikiLinkResolver()))
+        let attrs = MarkdownASTStyler.styleAttributes(text: text, fontName: fontName, fontSize: base, configuration: config)
+        let ns = text as NSString
+
+        let wikiLinkPos = ns.range(of: "test.md").location
+        let regularLinkPos = ns.range(of: "reg").location
+
+        #expect(attributeValue(.link, in: attrs, at: wikiLinkPos) as? String == "test.md")
+        #expect(attributeValue(.isWikiLink, in: attrs, at: wikiLinkPos) as? Bool == true)
+
+        #expect(attributeValue(.link, in: attrs, at: regularLinkPos) as? String == "test.md")
+        #expect(attributeValue(.isWikiLink, in: attrs, at: regularLinkPos) == nil)
+    }
 }
 
 /// Canonical, order-independent string of styled ranges so two style runs can be
